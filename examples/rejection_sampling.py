@@ -19,7 +19,7 @@ from transformers import AutoTokenizer
 from ludic.agent import Agent
 from ludic.context import FullDialog
 from ludic.inference import VLLMChatClient, InferenceSpec, SamplingParams, HFChatTemplate
-from ludic.interaction import SingleAgentSyncProtocol
+from ludic.interaction import SingleAgentProtocol
 from ludic.parsers import xml_tag_parser
 from ludic.training import RolloutEngine, EnvSpec, ProtocolSpec, RolloutRequest
 from ludic.types import Rollout, EnvironmentStep
@@ -95,7 +95,7 @@ async def generate_filtered_data(args: argparse.Namespace) -> None:
     prompt_text = build_system_prompt()
 
     def create_protocol():
-        return SingleAgentSyncProtocol(
+        return SingleAgentProtocol(
             agent=Agent(
                 client=client,
                 model=args.model,

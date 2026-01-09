@@ -10,7 +10,7 @@ from ludic.inference.client import ChatClient, ChatResponse
 from ludic.inference.request import TokenCompletionRequest, InferenceSpec, ReturnSpec
 from ludic.inference.sampling import SamplingParams
 from ludic.inference.tool_parser import HermesToolParser
-from ludic.interaction.single_agent import SingleAgentSyncProtocol
+from ludic.interaction.single_agent import SingleAgentProtocol
 from ludic.training.batching import RolloutEngine
 from ludic.training.types import EnvSpec, ProtocolSpec, RolloutRequest
 from ludic.types import Rollout
@@ -96,7 +96,7 @@ async def test_tool_role_tokens_are_masked_out(env_registry) -> None:
     )
 
     protocol_registry = {
-        "react_protocol": lambda: SingleAgentSyncProtocol(agent=agent)
+        "react_protocol": lambda: SingleAgentProtocol(agent=agent)
     }
     engine = RolloutEngine(
         env_registry=env_registry,

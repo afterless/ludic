@@ -153,7 +153,7 @@ so there's nothing to parse. The protocol handles them and the agent continues.
 Current behavior:
 - `ReActAgent` runs multiple model calls and returns per-call AgentSteps with token
   traces, plus one final env-targeted step.
-- `SingleAgentSyncProtocol` handles external tools via `external_tool_handler` callback.
+- `SingleAgentProtocol` handles external tools via `external_tool_handler` callback.
 - `MultiAgentSyncProtocol` logs AgentSteps but does not yet execute external tools.
 
 ## Delegation: Sub-Agent Calls via External Tools
@@ -204,7 +204,7 @@ but implemented at the protocol level rather than requiring special agent archit
 
 The infrastructure is in place:
 - `external_tools` parameter on `ToolAgent`/`ReActAgent`
-- `external_tool_handler` callback on `SingleAgentSyncProtocol`
+- `external_tool_handler` callback on `SingleAgentProtocol`
 - `action_target="external"` with `parse_result=None` for external tool calls
 
 What's needed for delegation:

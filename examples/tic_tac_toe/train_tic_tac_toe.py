@@ -3,7 +3,7 @@ Minimal Tic-Tac-Toe training scaffold.
 
 This wires together:
   - TicTacToeEnv single-agent episodes
-  - SingleAgentSyncProtocol with a shared VLLMChatClient
+  - SingleAgentProtocol with a shared VLLMChatClient
   - RolloutBatchSource + GroupNormalizedReturn credit
   - Trainer with REINFORCE loss
   - Optional periodic eval of win rate
@@ -25,7 +25,7 @@ from environments.tic_tac_toe import TicTacToeEnv
 from ludic.agent import Agent
 from ludic.context import FullDialog, TruncatedThinkingContext
 from ludic.inference import VLLMChatClient, InferenceSpec, SamplingParams, ReturnSpec, HFChatTemplate
-from ludic.interaction import SingleAgentSyncProtocol
+from ludic.interaction import SingleAgentProtocol
 from ludic.distributed.adapters import create_vllm_publisher
 from ludic.parsers import compose_parsers, think_prefix_parser, xml_tag_parser
 from ludic.eval import EngineEvaluator
@@ -215,7 +215,7 @@ def main():
             ctx = TruncatedThinkingContext(system_prompt=system_prompt)
         else:
             ctx = FullDialog(system_prompt=system_prompt)
-        return SingleAgentSyncProtocol(
+        return SingleAgentProtocol(
             agent=Agent(
                 client=client,
                 model=args.model,

@@ -10,7 +10,7 @@ def test_top_level_exports_import() -> None:
     from ludic.inference import VLLMChatClient, start_vllm_server, wait_for_vllm_health  # noqa: F401
     from ludic.interaction import (
         InteractionProtocol,
-        SingleAgentSyncProtocol,
+        SingleAgentProtocol,
         MultiAgentProtocol,
         TraceCollector,
     )  # noqa: F401

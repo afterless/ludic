@@ -26,7 +26,7 @@ from ludic.agent import Agent
 from ludic.context import FullDialog
 from ludic.eval import run_eval
 from ludic.inference import InferenceSpec, SamplingParams, ReturnSpec
-from ludic.interaction import SingleAgentSyncProtocol
+from ludic.interaction import SingleAgentProtocol
 from ludic.parsers import ParseResult
 from ludic.training import (
     EnvSpec,
@@ -180,7 +180,7 @@ async def run_training(args: argparse.Namespace) -> None:
     def protocol_factory():
         ctx = FullDialog(system_prompt=system_prompt)
         parser = TICTACTOE_PARSER
-        return SingleAgentSyncProtocol(
+        return SingleAgentProtocol(
             agent=Agent(
                 client=tinker_client,
                 model=args.model,

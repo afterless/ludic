@@ -1225,6 +1225,7 @@ dependencies = [
     { name = "openai" },
     { name = "peft" },
     { name = "rich" },
+    { name = "setuptools" },
     { name = "torch" },
     { name = "vllm" },
 ]
@@ -1271,6 +1272,7 @@ requires-dist = [
     { name = "peft", specifier = ">=0.18.0" },
     { name = "redis", marker = "extra == 'pipelinerl'", specifier = ">=7.1.0" },
     { name = "rich", specifier = ">=14.2.0" },
+    { name = "setuptools", specifier = ">=79.0.1" },
     { name = "tinker", marker = "extra == 'tinker'", specifier = "==0.7.0" },
     { name = "tinker-cookbook", marker = "extra == 'tinker'", git = "ssh://git@github.com/thinking-machines-lab/tinker-cookbook.git?rev=d2adfe562edb9cc97b43ceab537a3beeff892442" },
     { name = "torch", specifier = ">=2.8.0" },

@@ -4,7 +4,7 @@ import pytest
 
 from ludic.agents.base_agent import Agent
 from ludic.context.full_dialog import FullDialog
-from ludic.interaction.single_agent import SingleAgentSyncProtocol
+from ludic.interaction.single_agent import SingleAgentProtocol
 from ludic.parsers import ParseResult
 from tests._mocks import MockClient, MockEnv, MockChatTemplate
 
@@ -77,7 +77,7 @@ async def test_single_agent_protocol_marks_incomplete_completion_as_parse_error(
         parser=pass_through_parser,
         chat_template=MockChatTemplate(),
     )
-    protocol = SingleAgentSyncProtocol(agent=agent)
+    protocol = SingleAgentProtocol(agent=agent)
 
     env = MockEnv(max_steps=10, target="1")
     rollouts = await protocol.run(env=env, max_steps=1)

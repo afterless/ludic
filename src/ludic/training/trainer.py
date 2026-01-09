@@ -575,7 +575,11 @@ class Trainer:
             # ---- 2c) Loss + backward (scaled) --------------------------
             pre_forward_alloc = self._reset_peak_memory(device) if profile_memory else None
             try:
-                loss, stats = self.algo.compute_loss(self.model, batch_tensors)
+                loss, stats = self.algo.compute_loss(
+                    self.model,
+                    batch_tensors,
+                    cast_logits_to_fp32=self.cfg.cast_logits_to_fp32,
+                )
 
                 # Scale loss by micro-batch size to preserve macro-batch mean.
                 scaled_loss = loss * (item_count / total_items)

@@ -324,7 +324,7 @@ class TestGMPONumericalStability:
         # Loss should be near zero (since advantage is zero)
         assert torch.isfinite(loss)
         # With zero advantage, objective should be zero
-        assert torch.abs(loss.item()) < 1e-5
+        assert abs(loss.item()) < 1e-5
 
     def test_very_long_sequences(self):
         """Test GMPO with long sequences (stress test)."""

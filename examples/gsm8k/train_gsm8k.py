@@ -4,7 +4,7 @@ Minimal GSM8K training scaffold using DatasetQAEnv/GSM8KEnv and the built-in Tra
 This wires together:
   - HF datasets for GSM8K samples
   - single-sample QA envs (GSM8KEnv)
-  - SingleAgentSyncProtocol with a shared VLLMChatClient
+  - SingleAgentProtocol with a shared VLLMChatClient
   - RolloutBatchSource + MonteCarloReturn credit
   - Trainer with REINFORCE loss
 
@@ -27,7 +27,7 @@ from environments.gsm8k import GSM8KEnv
 from ludic.agent import Agent
 from ludic.context import FullDialog
 from ludic.inference import VLLMChatClient, InferenceSpec, SamplingParams, ReturnSpec, HFChatTemplate
-from ludic.interaction import SingleAgentSyncProtocol
+from ludic.interaction import SingleAgentProtocol
 from ludic.parsers import boxed_parser
 from ludic.distributed.adapters import create_vllm_publisher
 from ludic.eval import EngineEvaluator
@@ -139,7 +139,7 @@ def main():
     env_registry = {"gsm8k": lambda sample: GSM8KEnv(sample=sample, system_prompt=args.system_prompt)}
 
     def protocol_factory():
-        return SingleAgentSyncProtocol(
+        return SingleAgentProtocol(
             agent=Agent(
                 client=client,
                 model=args.model,

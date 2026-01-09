@@ -98,6 +98,113 @@ class GroupNormalizedReturn:
 
 
 @dataclass
+class HybridNormalizedReturn:
+    """
+    ScaleRL-style advantage normalization: group-mean baseline, batch-std scaling.
+
+    Formula: A_i = (R_i - mean(R_group)) / (std(A_batch) + eps)
+
+    This is more robust than pure group-level normalization (GroupNormalizedReturn)
+    because:
+    1. Avoids std=0 explosions in low-variance groups (easy prompts)
+    2. Provides consistent advantage scale across diverse prompts
+    3. Recommended by ScaleRL and "Tricks or Traps Part I" papers
+
+    The key insight: use group-level *centering* (baseline = group mean) but
+    batch-level *scaling* (divide by batch std). This combines GRPO's per-prompt
+    baseline with robust global scaling.
+
+    Contract:
+    - Rollouts must have `group_id` in `rollout.meta["request_meta"]["group_id"]`.
+    - Each group must have exactly `group_size` rollouts.
+    - Raises ValueError if either condition is violated.
+
+    Args:
+        group_size: Number of rollouts per group.
+        eps: Small constant for numerical stability in std division.
+        positive_only: If True, clip negative advantages to 0.
+
+    Reference: ScaleRL (arXiv:2510.13786), Tricks or Traps Part I (arXiv:2508.08221)
+    """
+
+    group_size: int
+    eps: float = 1e-8
+    positive_only: bool = False
+
+    def __post_init__(self):
+        if self.group_size <= 0:
+            raise ValueError(f"group_size must be positive, got {self.group_size}")
+
+    def compute(
+        self,
+        rollouts: List[Rollout],
+    ) -> Dict[RolloutStepKey, float]:
+
+        out: Dict[RolloutStepKey, float] = {}
+
+        # Group by group_id from request meta
+        groups: Dict[str, List[Rollout]] = defaultdict(list)
+        for r in rollouts:
+            group_id = r.meta.get("request_meta", {}).get("group_id")
+            if group_id is None:
+                raise ValueError(
+                    f"Rollout {r.id} missing group_id in meta['request_meta']. "
+                    "HybridNormalizedReturn requires each rollout to have a group_id."
+                )
+            groups[group_id].append(r)
+
+        # Phase 1: Compute group-centered advantages (A_i = R_i - mean(R_group))
+        # Store (rollout, advantage) pairs for batch-level normalization
+        all_advantages: List[float] = []
+        rollout_advantages: List[tuple[Rollout, float]] = []
+
+        for group_id, group_rollouts in groups.items():
+            # Validate group size
+            actual_size = len(group_rollouts)
+            if actual_size != self.group_size:
+                raise ValueError(
+                    f"Group size mismatch for group_id={group_id}: "
+                    f"expected {self.group_size}, got {actual_size}."
+                )
+
+            # Get total reward for each rollout in the group
+            rewards = torch.tensor(
+                [r.total_reward for r in group_rollouts],
+                dtype=torch.float32,
+            )
+
+            # Group-level centering: A_i = R_i - mean(R_group)
+            baseline = rewards.mean()
+            advantages = rewards - baseline
+
+            for i, r in enumerate(group_rollouts):
+                adv = advantages[i].item()
+                all_advantages.append(adv)
+                rollout_advantages.append((r, adv))
+
+        # Phase 2: Batch-level std normalization
+        if len(all_advantages) == 0:
+            return out
+
+        all_adv_tensor = torch.tensor(all_advantages, dtype=torch.float32)
+        batch_std = all_adv_tensor.std(unbiased=False)
+
+        # Normalize all advantages by batch std
+        for rollout, raw_adv in rollout_advantages:
+            adv = raw_adv / (batch_std.item() + self.eps)
+
+            if self.positive_only:
+                adv = max(adv, 0.0)
+
+            # Assign same advantage to all steps in the rollout
+            for step in rollout.steps:
+                key: RolloutStepKey = (rollout.id, step.index)
+                out[key] = adv
+
+        return out
+
+
+@dataclass
 class MonteCarloReturn:
     """
     Monte Carlo return per step:

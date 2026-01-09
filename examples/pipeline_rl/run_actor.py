@@ -16,7 +16,7 @@ from ludic.training import (
     RolloutRequest,
     make_reinforce,
 )
-from ludic.interaction import SingleAgentSyncProtocol
+from ludic.interaction import SingleAgentProtocol
 
 # Env Import
 from environments.tic_tac_toe import TicTacToeEnv
@@ -42,7 +42,7 @@ def create_engine(client: VLLMChatClient, chat_template: HFChatTemplate) -> Roll
     training_prompt = base_prompt + "\n\nOutput your move as a single XML tag, e.g., <move>A1</move>."
 
     def create_protocol():
-        return SingleAgentSyncProtocol(
+        return SingleAgentProtocol(
             agent=Agent(
                 client=client, 
                 model=MODEL_NAME, 

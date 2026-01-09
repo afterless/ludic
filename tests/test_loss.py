@@ -27,7 +27,11 @@ class MockLoss(Loss):
     loss_val: float
     stats: Dict[str, Any]
 
-    def compute(self, logits: Tensor, batch: Batch) -> Tuple[Tensor, Dict[str, Any]]:
+    def compute(
+        self,
+        logits: Tensor,
+        batch: Batch,
+    ) -> Tuple[Tensor, Dict[str, Any]]:
         return torch.tensor(self.loss_val, dtype=torch.float32), self.stats
 
 
@@ -547,3 +551,54 @@ def test_composite_loss():
         "kl/kl_mean": 0.5,
     }
     assert stats == expected_stats
+
+
+def test_shared_context_caches_token_logp(monkeypatch):
+    """SharedContext should compute token_logp once and reuse the same tensor."""
+    import ludic.training.loss as loss_mod
+
+    calls = {"count": 0}
+
+    def fake_compute_token_logp_raw(logits: Tensor, input_ids: Tensor) -> Tensor:
+        calls["count"] += 1
+        B, T, _ = logits.shape
+        return torch.zeros((B, T - 1), dtype=logits.dtype)
+
+    monkeypatch.setattr(loss_mod, "_compute_token_logp_raw", fake_compute_token_logp_raw)
+
+    seen: Dict[str, Tensor] = {}
+
+    class UseLogp:
+        def compute(
+            self,
+            logits: Tensor,
+            batch: Batch,
+        ) -> Tuple[Tensor, Dict[str, Any]]:
+            token_logp = loss_mod.compute_token_logp(logits, batch["input_ids"])
+            seen["first"] = token_logp
+            return token_logp.sum(), {}
+
+    class UseLogpAgain:
+        def compute(
+            self,
+            logits: Tensor,
+            batch: Batch,
+        ) -> Tuple[Tensor, Dict[str, Any]]:
+            token_logp = loss_mod.compute_token_logp(logits, batch["input_ids"])
+            seen["second"] = token_logp
+            return token_logp.sum(), {}
+
+    composite_loss = CompositeLoss(
+        terms=[
+            LossTerm(name="a", loss=UseLogp(), weight=1.0),
+            LossTerm(name="b", loss=UseLogpAgain(), weight=1.0),
+        ]
+    )
+
+    logits = torch.zeros((1, 2, 3), dtype=torch.float32)
+    batch = {"input_ids": torch.tensor([[0, 1]], dtype=torch.long)}
+
+    composite_loss.compute(logits, batch)
+
+    assert calls["count"] == 1
+    assert seen["first"] is seen["second"]

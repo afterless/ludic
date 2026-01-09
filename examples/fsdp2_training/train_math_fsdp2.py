@@ -30,7 +30,7 @@ from environments.math import MATHEnv
 from ludic.agent import Agent
 from ludic.context import FullDialog
 from ludic.inference import VLLMChatClient, InferenceSpec, SamplingParams, ReturnSpec, HFChatTemplate
-from ludic.interaction import SingleAgentSyncProtocol
+from ludic.interaction import SingleAgentProtocol
 from ludic.distributed import create_vllm_publisher
 from ludic.parsers import boxed_parser, extract_last_boxed_content
 from ludic.eval import EngineEvaluator
@@ -300,7 +300,7 @@ def main() -> None:
     env_registry = {"math": lambda sample: MATHEnv(sample=sample, system_prompt=args.system_prompt)}
 
     def protocol_factory():
-        return SingleAgentSyncProtocol(
+        return SingleAgentProtocol(
             agent=Agent(
                 client=client,
                 model=args.model,

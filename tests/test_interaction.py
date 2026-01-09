@@ -2,7 +2,7 @@ from typing import Dict, List, Tuple, Optional
 import pytest
 
 from ludic.context.full_dialog import FullDialog
-from ludic.interaction.single_agent import SingleAgentSyncProtocol
+from ludic.interaction.single_agent import SingleAgentProtocol
 from ludic.interaction.multi_agent import MultiAgentProtocol
 from ludic.agents.base_agent import Agent
 from ludic.inference.client import ChatResponse
@@ -36,7 +36,7 @@ async def test_happy_path_terminates_immediately():
     env = MockEnv(max_steps=3, target="1")
     # MockAgent provides a default ctx and a pass-through parser
     agent = MockAgent(client=MockClient(text="1"))
-    protocol = SingleAgentSyncProtocol(agent=agent)
+    protocol = SingleAgentProtocol(agent=agent)
 
     # run() now returns List[Rollout]
     rollouts = await protocol.run(
@@ -64,7 +64,7 @@ async def test_truncation_when_agent_is_wrong():
 
     env = MockEnv(max_steps=2, target="1")
     agent = MockAgent(client=WrongClient())
-    protocol = SingleAgentSyncProtocol(agent=agent)
+    protocol = SingleAgentProtocol(agent=agent)
 
     rollouts = await protocol.run(
         env=env,
@@ -112,7 +112,7 @@ async def test_run_episode_uses_action_parser_and_logs_parsed_action():
         chat_template=MockChatTemplate(),
     )
     
-    protocol = SingleAgentSyncProtocol(agent=agent)
+    protocol = SingleAgentProtocol(agent=agent)
 
     rollouts = await protocol.run(
         env=env,
@@ -332,7 +332,7 @@ async def test_multi_agent_handles_unmanaged_bot_turns():
 @pytest.mark.asyncio
 async def test_single_agent_protocol_logs_parser_failure_without_env_step():
     """
-    If the agent parser fails, SingleAgentSyncProtocol should:
+    If the agent parser fails, SingleAgentProtocol should:
       - NOT call env.step()
       - log a synthetic step with parse_error info
       - feed the synthetic observation back to the agent context
@@ -358,7 +358,7 @@ async def test_single_agent_protocol_logs_parser_failure_without_env_step():
         parser=always_fail_parser,
         chat_template=MockChatTemplate(),
     )
-    protocol = SingleAgentSyncProtocol(agent=agent)
+    protocol = SingleAgentProtocol(agent=agent)
 
     rollouts = await protocol.run(env=env, max_steps=1)
 
@@ -527,7 +527,7 @@ async def test_single_agent_max_steps_truncation():
     # Agent always says "wrong", env wants "correct"
     env = MockEnv(max_steps=10, target="correct")  # env allows many steps
     agent = MockAgent(client=MockClient(text="wrong"))
-    protocol = SingleAgentSyncProtocol(agent=agent)
+    protocol = SingleAgentProtocol(agent=agent)
 
     # Protocol max_steps=3, so we'll hit that before env's max_steps
     rollouts = await protocol.run(env=env, max_steps=3)
@@ -564,7 +564,7 @@ async def test_single_agent_env_truncation_preserved():
     # Env will truncate after 2 wrong answers
     env = MockEnv(max_steps=2, target="correct")
     agent = MockAgent(client=MockClient(text="wrong"))
-    protocol = SingleAgentSyncProtocol(agent=agent)
+    protocol = SingleAgentProtocol(agent=agent)
 
     # Protocol allows many steps, but env will truncate at 2
     rollouts = await protocol.run(env=env, max_steps=100)
@@ -591,7 +591,7 @@ async def test_single_agent_normal_termination_not_truncated():
     """
     env = MockEnv(max_steps=10, target="win")
     agent = MockAgent(client=MockClient(text="win"))
-    protocol = SingleAgentSyncProtocol(agent=agent)
+    protocol = SingleAgentProtocol(agent=agent)
 
     rollouts = await protocol.run(env=env, max_steps=100)
 

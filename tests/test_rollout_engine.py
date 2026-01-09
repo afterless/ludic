@@ -8,7 +8,7 @@ import pytest
 from ludic.agents.base_agent import Agent
 from ludic.inference.client import ChatResponse
 from ludic.interaction.base import InteractionProtocol
-from ludic.interaction.single_agent import SingleAgentSyncProtocol
+from ludic.interaction.single_agent import SingleAgentProtocol
 from ludic.context.full_dialog import FullDialog
 from ludic.envs.env import LudicEnv
 from ludic.inference.request import TokenCompletionRequest, InferenceSpec, ReturnSpec
@@ -158,7 +158,7 @@ async def test_generate_rollouts_basic_metadata_and_termination(
     mock_agent,
 ) -> None:
     protocol_registry: ProtocolRegistry = {
-        "mock_protocol": lambda: SingleAgentSyncProtocol(agent=mock_agent)
+        "mock_protocol": lambda: SingleAgentProtocol(agent=mock_agent)
     }
     
     engine = RolloutEngine(
@@ -251,7 +251,7 @@ async def test_generate_rollouts_unknown_env_raises(
     mock_agent,
 ) -> None:
     protocol_registry = {
-        "mock_protocol": lambda: SingleAgentSyncProtocol(agent=mock_agent)
+        "mock_protocol": lambda: SingleAgentProtocol(agent=mock_agent)
     }
     engine = RolloutEngine(
         env_registry=env_registry,
@@ -307,10 +307,10 @@ async def test_generate_rollouts_heterogeneous_protocols(
     """
     # Define two different agent/protocol setups
     agent_A = MockAgent(client=MockClient(text="Agent A says hi"))
-    protocol_A = SingleAgentSyncProtocol(agent=agent_A)
+    protocol_A = SingleAgentProtocol(agent=agent_A)
 
     agent_B = MockAgent(client=MockClient(text="Agent B says hi"))
-    protocol_B = SingleAgentSyncProtocol(agent=agent_B)
+    protocol_B = SingleAgentProtocol(agent=agent_B)
 
     protocol_registry = {
         "protocol_A": lambda: protocol_A,
@@ -366,7 +366,7 @@ async def test_generate_rollouts_writes_jsonl(
     jsonl_path = tmp_path / "rollouts.jsonl"
     
     protocol_registry = {
-        "mock_protocol": lambda: SingleAgentSyncProtocol(agent=mock_agent)
+        "mock_protocol": lambda: SingleAgentProtocol(agent=mock_agent)
     }
 
     engine = RolloutEngine(
@@ -423,7 +423,7 @@ async def test_generate_batch_uses_model_token_ids_when_available(
     )
     
     protocol_registry = {
-        "token_protocol": lambda: SingleAgentSyncProtocol(agent=agent)
+        "token_protocol": lambda: SingleAgentProtocol(agent=agent)
     }
 
     engine = RolloutEngine(
@@ -756,7 +756,7 @@ async def test_rollout_batch_source_next_batch_integration(
         chat_template=MockChatTemplate(),
     )
     protocol_registry = {
-        "mock_protocol": lambda: SingleAgentSyncProtocol(agent=agent)
+        "mock_protocol": lambda: SingleAgentProtocol(agent=agent)
     }
     
     engine = RolloutEngine(
@@ -813,7 +813,7 @@ async def test_rollout_batch_source_passes_sample_filter(
         chat_template=MockChatTemplate(),
     )
     protocol_registry = {
-        "mock_protocol": lambda: SingleAgentSyncProtocol(agent=agent)
+        "mock_protocol": lambda: SingleAgentProtocol(agent=agent)
     }
 
     engine = RolloutEngine(
@@ -866,7 +866,7 @@ async def test_saw_item_contains_truncation_flags(
         chat_template=MockChatTemplate(),
     )  # Never terminates the env since it never outputs target="win"
     protocol_registry = {
-        "mock_protocol": lambda: SingleAgentSyncProtocol(agent=agent),
+        "mock_protocol": lambda: SingleAgentProtocol(agent=agent),
     }
 
     engine = RolloutEngine(
@@ -922,7 +922,7 @@ async def test_generate_batch_applies_sample_filter_and_updates_counts(
         chat_template=MockChatTemplate(),
     )  # Never terminates the env since it never outputs target="win"
     protocol_registry = {
-        "mock_protocol": lambda: SingleAgentSyncProtocol(agent=agent),
+        "mock_protocol": lambda: SingleAgentProtocol(agent=agent),
     }
 
     engine = RolloutEngine(
@@ -990,7 +990,7 @@ async def test_avg_completion_length_respects_filtered_items(
         chat_template=MockChatTemplate(),
     )
     protocol_registry = {
-        "mock_protocol": lambda: SingleAgentSyncProtocol(agent=agent),
+        "mock_protocol": lambda: SingleAgentProtocol(agent=agent),
     }
 
     engine = RolloutEngine(

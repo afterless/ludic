@@ -28,6 +28,7 @@ from .algorithm import (
     make_cispo,
     make_sapo,
     make_gmpo,
+    make_scalerl,
     make_sft,
 )
 from .credit_assignment import (
@@ -91,6 +92,7 @@ __all__ = [
     "make_cispo",
     "make_sapo",
     "make_gmpo",
+    "make_scalerl",
     "make_sft",
     # Credit assignment
     "GroupNormalizedReturn",

@@ -17,8 +17,16 @@ from ludic.training.loss import (
     SAPOLoss,
     GMPOLoss,
     MaskedCausalLMCrossEntropyLoss,
+    CompositeLoss,
+    LossTerm,
+    TokenKLLoss,
 )
-from ludic.training.credit_assignment import MonteCarloReturn, GroupNormalizedReturn, ConstantCredit
+from ludic.training.credit_assignment import (
+    MonteCarloReturn,
+    GroupNormalizedReturn,
+    HybridNormalizedReturn,
+    ConstantCredit,
+)
 
 
 Batch = Mapping[str, Tensor]
@@ -49,9 +57,19 @@ class RLAlgorithm:
         self,
         model: nn.Module,
         batch: Batch,
+        *,
+        cast_logits_to_fp32: bool = False,
     ) -> tuple[Tensor, Dict[str, Any]]:
         """
         Runs the forward pass once and delegates to the Loss object.
+
+        Args:
+            model: The trainable model.
+            batch: Collated batch tensors (input_ids, attention_mask, etc.).
+            cast_logits_to_fp32: If True, cast logits to FP32 before loss computation.
+                This improves importance sampling ratio stability for ratio-based
+                objectives (GRPO, CISPO, etc.) by reducing precision errors in
+                exp(log_ratio). Recommended by ScaleRL paper (arXiv:2510.13786).
         """
         # --- Run the forward pass ---
         input_ids = batch["input_ids"]
@@ -61,6 +79,10 @@ class RLAlgorithm:
             attention_mask=attention_mask,
         )
         logits: Logits = outputs.logits
+
+        # ScaleRL: FP32 logits prevent IS ratio precision issues in exp(logp_new - logp_old)
+        if cast_logits_to_fp32:
+            logits = logits.float()
 
         # Pass the resulting logits to the loss function
         return self.loss.compute(logits, batch)
@@ -706,4 +728,106 @@ def make_sft(
         name=name,
         credit_assigner=credit_assigner,
         loss=loss,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ScaleRL (CISPO + Hybrid Normalization)
+# ---------------------------------------------------------------------------
+
+
+def make_scalerl(
+    *,
+    group_size: int,
+    positive_only: bool = False,
+    clip_eps_low: float = 0.20,
+    clip_eps_high: float = 0.28,
+    length_normalize: bool = True,
+    kl_coeff: float = 0.0,
+    drop_zero_weight_eps: float = 1e-4,
+    name: str = "scalerl",
+) -> RLAlgorithm:
+    """
+    ScaleRL recipe: CISPO loss + hybrid advantage normalization + zero-weight filtering.
+
+    This combines the key sample-efficiency improvements from the ScaleRL paper:
+
+    1. **HybridNormalizedReturn**: Group-mean centering + batch-std scaling.
+       More robust than pure group-level normalization because it avoids
+       std=0 explosions in low-variance groups (easy prompts).
+
+    2. **CISPOLoss**: Truncated IS-weight policy gradient that preserves
+       gradient contributions from rare tokens (crucial for reflective
+       reasoning behaviors like "Wait", "However", "Recheck").
+
+    3. **Drop zero-weight samples**: After credit assignment, drop samples with
+       near-zero weight to reduce no-op updates.
+
+    4. **FP32 logits** (via TrainerConfig.cast_logits_to_fp32):
+       Recommended for IS ratio stability. Not controlled by this preset—
+       set in TrainerConfig.
+
+    Args:
+        group_size: Number of rollouts per group (required for credit assignment).
+        positive_only: If True, clip negative advantages to zero (REINFORCE-only).
+        clip_eps_low: Lower CISPO clipping bound. Default 0.20 per context-notes.md.
+        clip_eps_high: Upper CISPO clipping bound. Default 0.28 per context-notes.md.
+        length_normalize: Whether to normalize by number of action tokens.
+        kl_coeff: Coefficient for optional token-level KL penalty.
+            Set > 0 for additional stability. Typical: 0.01-0.1. Default 0.0.
+        drop_zero_weight_eps: Epsilon for zero-weight sample detection.
+        name: Algorithm name for logging/metrics.
+
+    Note: Rollouts must carry `group_id` in their metadata and each group
+    must have exactly `group_size` members. Use GRPORequestStrategy for
+    request expansion.
+
+    References:
+        - ScaleRL: arXiv:2510.13786
+        - DAPO (zero-weight filtering): arXiv:2503.14476
+        - MiniMax-M1 (CISPO): arXiv:2506.13585
+    """
+    # HybridNormalizedReturn: group-mean baseline + batch-std scaling
+    credit_assigner: CreditAssigner = HybridNormalizedReturn(
+        group_size=group_size,
+        positive_only=positive_only,
+    )
+
+    # CISPO loss with asymmetric clipping
+    cispo_loss: Loss = CISPOLoss(
+        clip_eps_low=clip_eps_low,
+        clip_eps_high=clip_eps_high,
+        length_normalize=length_normalize,
+    )
+
+    # Optionally add token-level KL penalty for stability
+    if kl_coeff > 0:
+        kl_loss = TokenKLLoss(coeff=kl_coeff, length_normalize=length_normalize)
+        loss: Loss = CompositeLoss(
+            terms=[
+                LossTerm(name="cispo", loss=cispo_loss, weight=1.0),
+                LossTerm(name="kl", loss=kl_loss, weight=1.0),
+            ]
+        )
+    else:
+        loss = cispo_loss
+
+    # Build preprocessing pipeline (order matters)
+    preprocess_fns = []
+
+    # 1. Drop individual zero-weight samples (after credit assignment)
+    preprocess_fns.append(
+        lambda batch: drop_zero_weight_samples(batch, eps=drop_zero_weight_eps)
+    )
+
+    # 2. Validate actor logprobs (required for CISPO ratio computation)
+    preprocess_fns.append(validate_actor_logps)
+
+    preprocess = compose_preprocess(*preprocess_fns)
+
+    return RLAlgorithm(
+        name=name,
+        credit_assigner=credit_assigner,
+        loss=loss,
+        preprocess=preprocess,
     )

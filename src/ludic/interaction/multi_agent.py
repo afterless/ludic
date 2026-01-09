@@ -32,6 +32,12 @@ class MultiAgentProtocol(InteractionProtocol):
       logged for the failing agent (reward=parse_result.reward, info
       includes parse_error=True). The failing agent's context is updated
       with the synthetic observation for the next turn.
+
+    Async environment support:
+      This protocol does NOT currently support async environments.
+      It uses the synchronous env.reset() and env.step() methods.
+      For async multi-agent environments, this protocol would need
+      async detection similar to SingleAgentProtocol.
     """
 
     def __init__(self, agents: Dict[str, Agent]):

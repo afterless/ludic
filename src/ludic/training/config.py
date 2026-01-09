@@ -68,6 +68,13 @@ class TrainerConfig:
           Optional string to configure FSDP's mixed precision policy.
           Use "bf16" or "fp16". If None, defaults to full precision (fp32).
 
+    - cast_logits_to_fp32:
+          If True, cast model logits to FP32 before loss computation.
+          Critical for importance sampling stability in ratio-based RL objectives
+          (GRPO, CISPO, etc.) where BF16 precision errors compound in exp(log_ratio).
+          Follows ScaleRL paper's "FP32 at LM head" recommendation.
+          See: arXiv:2510.13786 (ScaleRL)
+
     ==========================
     Distributed
     ==========================
@@ -124,6 +131,7 @@ class TrainerConfig:
     micro_token_budget: int = 8192
     sync_every_steps: int = 1
     mixed_precision_dtype: Optional[str] = "bf16"
+    cast_logits_to_fp32: bool = False  # ScaleRL: FP32 logits for IS ratio stability
 
     # PipelineRL specific settings
     max_lag: Optional[int] = None  # Drop batches older than N steps

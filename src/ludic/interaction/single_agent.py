@@ -18,9 +18,9 @@ logger = logging.getLogger(__name__)
 ExternalToolHandler = Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]
 
 
-class SingleAgentSyncProtocol(InteractionProtocol):
+class SingleAgentProtocol(InteractionProtocol):
     """
-    Implements the standard single-agent, synchronous interaction loop.
+    Implements the standard single-agent interaction loop.
 
     This protocol consumes a LudicEnv but ASSUMES it has exactly
     one agent and that this agent is active every step.
@@ -46,6 +46,7 @@ class SingleAgentSyncProtocol(InteractionProtocol):
       Uses the context's default_system_prompt if present; otherwise falls
       back to env.suggested_sysprompt. There is no protocol-level prompt
       override.
+
     """
 
     def __init__(
@@ -84,7 +85,7 @@ class SingleAgentSyncProtocol(InteractionProtocol):
         inference: Optional[InferenceSpec] = None,
         timeout_s: Optional[float] = None,
     ) -> List[Rollout]:
-        
+
         agent = self.agent
         inf = inference or InferenceSpec()
 
@@ -92,16 +93,15 @@ class SingleAgentSyncProtocol(InteractionProtocol):
         agent_ids = env.agent_ids
         if len(agent_ids) != 1:
             raise ValueError(
-                f"SingleAgentSyncProtocol requires a LudicEnv with "
+                f"SingleAgentProtocol requires a LudicEnv with "
                 f"exactly one agent, but found {len(agent_ids)}."
             )
         agent_id = agent_ids[0]
 
         # 2. --- Reset Env ---
-        # env.reset() returns a dict
         obs_info_dict = env.reset(seed=env_seed)
         obs, info = obs_info_dict[agent_id]
-        
+
         # 3. --- Reset Agent & Feed First Obs ---
         # Choose system prompt: prefer the context's default if set, else env suggestion.
         ctx_default_prompt = getattr(getattr(agent, "_ctx", None), "default_system_prompt", None)
@@ -110,7 +110,7 @@ class SingleAgentSyncProtocol(InteractionProtocol):
 
         agent.reset(system_prompt=sys_prompt)
         agent.on_env_reset(obs, info)
-        
+
         # Accumulate steps locally first
         steps: List[Step] = []
         step_index = 0
@@ -121,15 +121,15 @@ class SingleAgentSyncProtocol(InteractionProtocol):
         # 4. --- Run Interaction Loop ---
         for t in range(max_steps):
             parse_halt = False
-            
+
             # Check that our agent is the one expected to act
             active_agents = env.active_agents
             if agent_id not in active_agents:
                 # This env is not a simple single-agent env, stop.
-                break 
+                break
 
             current_obs_for_step = obs
-            
+
             # --- A. Call the Agent ---
             act_result = await agent.act(
                 inference=inf,
@@ -382,3 +382,4 @@ class SingleAgentSyncProtocol(InteractionProtocol):
             }
         )
         return [rollout]
+
