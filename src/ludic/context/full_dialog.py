@@ -16,4 +16,11 @@ class FullDialog(ContextStrategy):
         self._messages.append({"role": "assistant", "content": assistant_text})
 
     def on_after_step(self, next_obs: Observation, info: Info) -> None:
-        self._messages.append({"role": "user", "content": next_obs})
+        if "tool_name" in info:
+            self.add_tool_result(
+                str(info.get("tool_call_id", "")),
+                str(info["tool_name"]),
+                next_obs,
+            )
+        else:
+            self._messages.append({"role": "user", "content": next_obs})

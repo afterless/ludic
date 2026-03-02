@@ -327,9 +327,7 @@ class VLLMChatClient(ChatClient):
             raise RuntimeError(
                 f"Server rejected update_param_batch: {resp.status_code} {resp.text}"
             )
-        
-        time.sleep(1.0)
-        
+
         # 3. Data Plane: Stream Tensors
         for name in sorted_keys:
             tensor = params[name]

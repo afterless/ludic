@@ -3,6 +3,7 @@ from __future__ import annotations
 import pickle
 import logging
 import asyncio
+import time
 from typing import List, Callable, Optional
 from dataclasses import replace
 
@@ -118,14 +119,22 @@ async def run_pipeline_actor(
 
     r_conn = redis.from_url(redis_url)
     logger.info(f"Pipeline Actor connected to Redis at {redis_url}")
-    
+
+    batch_num = 0
+    total_pushed = 0
+
     while True:
         # 1. Get Intent (and apply Strategy via requests_fn)
         requests = requests_fn()
         if not requests:
             await asyncio.sleep(1.0)
             continue
-        
+
+        batch_num += 1
+        num_episodes = sum(r.num_episodes for r in requests)
+        logger.info(f"[batch {batch_num}] Generating {num_episodes} episodes from {len(requests)} requests (concurrency={concurrency}, max_steps={max_steps})")
+        batch_start = time.monotonic()
+
         # 2. Fetch Version (Clock Sync)
         current_ver = 0
         if client:
@@ -137,7 +146,7 @@ async def run_pipeline_actor(
         for req in requests:
             new_meta = req.meta.copy()
             new_meta["policy_version"] = current_ver
-            
+
             # Use replace to safely copy the dataclass with updated meta
             tagged_requests.append(replace(req, meta=new_meta))
 
@@ -153,16 +162,21 @@ async def run_pipeline_actor(
                 concurrency=concurrency,
             )
         except Exception as e:
-            logger.error(f"Error in actor generation loop: {e}")
+            logger.error(f"Error in actor generation loop: {e}", exc_info=True)
             await asyncio.sleep(1.0)
             continue
-        
+
+        elapsed = time.monotonic() - batch_start
+
         if not saw_batch.items:
+            logger.info(f"[batch {batch_num}] Empty batch after {elapsed:.1f}s, retrying...")
             await asyncio.sleep(0.1)
             continue
 
+        logger.info(f"[batch {batch_num}] Generated {len(saw_batch.items)} SAWItems in {elapsed:.1f}s (avg_reward={saw_batch.meta.get('avg_total_reward', 0):.3f})")
+
         # 5. Serialize & Push
-        # We unbundle the batch so the Trainer can re-bundle them into 
+        # We unbundle the batch so the Trainer can re-bundle them into
         # whatever batch size it prefers.
         pipe = r_conn.pipeline()
         count = 0
@@ -179,6 +193,7 @@ async def run_pipeline_actor(
         if count > 0:
             try:
                 pipe.execute()
-                logger.debug(f"Pushed {count} items (v{current_ver}) to {queue_key}")
+                total_pushed += count
+                logger.info(f"[batch {batch_num}] Pushed {count} items to Redis (v{current_ver}, total={total_pushed})")
             except redis.RedisError as e:
                 logger.error(f"Redis pipeline error: {e}")

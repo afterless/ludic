@@ -39,7 +39,7 @@ class VllmControlPlane(ControlPlane):
         resp = self.session.post(
             f"{self.url}/update_param_batch",
             json=payload,
-            timeout=30.0,
+            timeout=120.0,
         )
         resp.raise_for_status()
 

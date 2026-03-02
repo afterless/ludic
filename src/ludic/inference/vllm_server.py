@@ -45,8 +45,7 @@ from vllm.v1.sample.logits_processor.interface import (
 # Global state for weight updates & background tasks
 # ---------------------------------------------------------------------------
 
-MAX_CONCURRENT_WEIGHT_UPDATES = 10
-weight_update_semaphore = asyncio.Semaphore(MAX_CONCURRENT_WEIGHT_UPDATES)
+weight_update_lock = asyncio.Lock()
 
 background_tasks: Set[asyncio.Task[Any]] = set()
 
@@ -416,13 +415,21 @@ async def run_server(args: Namespace) -> None:
         shape = data.get("shape")
         shape_tuple = tuple(shape)
 
-        async def throttled_update() -> None:
-            async with weight_update_semaphore:
-                await engine.collective_rpc(
-                    "update_named_param", args=(name, dtype, shape_tuple)
-                )
+        await engine.pause_generation(
+            wait_for_inflight_requests=True,
+            clear_cache=False,
+        )
 
-        create_background_task(throttled_update())
+        async def do_update() -> None:
+            async with weight_update_lock:
+                try:
+                    await engine.collective_rpc(
+                        "update_named_param", args=(name, dtype, shape_tuple)
+                    )
+                finally:
+                    await engine.resume_generation()
+
+        create_background_task(do_update())
         return {"status": "ok"}
 
     @app.post("/update_param_batch")
@@ -432,43 +439,29 @@ async def run_server(args: Namespace) -> None:
         Triggers the worker extension to enter the receiving loop.
         """
         data = await request.json()
-        metadata = data.get("metadata", [])  # List of {name, dtype, shape}
-        
-        # --- DEBUG: Verify what the server received ---
-        print("\n" + "="*80)
-        print(f"📥 [SERVER DEBUG] Received Batch Metadata (Total: {len(metadata)})")
-        print("="*80)
-        for i, m in enumerate(metadata):
-            # Print only first 10 to avoid spamming logs, or all if short
-            if i < 10:
-                print(f"  • {m.get('name')} | {m.get('shape')}")
-        if len(metadata) > 10:
-            print(f"  ... (+{len(metadata)-10} more)")
-        print("="*80 + "\n")
-        # ----------------------------------------------
-
-        # Check if an explicit version was provided by the Trainer
+        metadata = data.get("metadata", [])
         forced_version = data.get("version")
-
-        # Convert dicts to tuples for RPC serialization safety
-        # (name, dtype, shape)
         rpc_args = [(m["name"], m["dtype"], m["shape"]) for m in metadata]
 
-        async def do_update_batch() -> None:
-            async with weight_update_semaphore:
-                # This RPC call will block the workers in the receiving loop
-                # until the client finishes broadcasting all tensors.
-                await engine.collective_rpc("update_param_batch", args=(rpc_args,))
+        await engine.pause_generation(
+            wait_for_inflight_requests=True,
+            clear_cache=False,
+        )
 
-                # Reset cache and bump version after full batch
-                await engine.reset_prefix_cache()
-                
-                global RUNTIME_VERSION
-                async with RUNTIME_VERSION_LOCK:
-                    if forced_version is not None:
-                        RUNTIME_VERSION = int(forced_version)
-                    else:
-                        RUNTIME_VERSION += 1
+        async def do_update_batch() -> None:
+            async with weight_update_lock:
+                try:
+                    await engine.collective_rpc("update_param_batch", args=(rpc_args,))
+                    await engine.reset_prefix_cache()
+
+                    global RUNTIME_VERSION
+                    async with RUNTIME_VERSION_LOCK:
+                        if forced_version is not None:
+                            RUNTIME_VERSION = int(forced_version)
+                        else:
+                            RUNTIME_VERSION += 1
+                finally:
+                    await engine.resume_generation()
 
         create_background_task(do_update_batch())
         return {"status": "ok"}
@@ -490,26 +483,33 @@ async def run_server(args: Namespace) -> None:
         params = data.get("params", [])
         requested_version = data.get("version")
 
+        await engine.pause_generation(
+            wait_for_inflight_requests=True,
+            clear_cache=False,
+        )
+
         async def do_update() -> None:
-            async with weight_update_semaphore:
-                for p in params:
-                    name = p["name"]
-                    dtype = p["dtype"]
-                    shape = tuple(p["shape"])
-                    await engine.collective_rpc(
-                        "update_named_param", args=(name, dtype, shape)
-                    )
-                
-                global RUNTIME_VERSION
-                async with RUNTIME_VERSION_LOCK:
-                    if requested_version is not None:
-                        try:
-                            RUNTIME_VERSION = int(requested_version)
-                        except ValueError:
-                            # If version is a string (e.g. "v1"), just increment
+            async with weight_update_lock:
+                try:
+                    for p in params:
+                        name = p["name"]
+                        dtype = p["dtype"]
+                        shape = tuple(p["shape"])
+                        await engine.collective_rpc(
+                            "update_named_param", args=(name, dtype, shape)
+                        )
+
+                    global RUNTIME_VERSION
+                    async with RUNTIME_VERSION_LOCK:
+                        if requested_version is not None:
+                            try:
+                                RUNTIME_VERSION = int(requested_version)
+                            except ValueError:
+                                RUNTIME_VERSION += 1
+                        else:
                             RUNTIME_VERSION += 1
-                    else:
-                        RUNTIME_VERSION += 1
+                finally:
+                    await engine.resume_generation()
 
         create_background_task(do_update())
         return {"status": "ok", "requested_version": requested_version}

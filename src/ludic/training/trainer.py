@@ -574,6 +574,7 @@ class Trainer:
 
             # ---- 2c) Loss + backward (scaled) --------------------------
             pre_forward_alloc = self._reset_peak_memory(device) if profile_memory else None
+
             try:
                 loss, stats = self.algo.compute_loss(
                     self.model,

@@ -91,15 +91,20 @@ class HFChatTemplate:
         tokenizer: "PreTrainedTokenizerBase",
         *,
         tool_parser: Optional[ToolParser] = None,
+        enable_thinking: Optional[bool] = None,
     ) -> None:
         """
         Args:
             tokenizer: HuggingFace tokenizer with chat_template support.
             tool_parser: Parser for extracting tool calls from model output.
                         Required if using tools.
+            enable_thinking: If set, passes enable_thinking to apply_chat_template.
+                            Use False to disable chain-of-thought on models that support
+                            it (e.g. Qwen3). None means the kwarg is not passed at all.
         """
         self._tokenizer = tokenizer
         self._tool_parser = tool_parser
+        self._enable_thinking = enable_thinking
 
     def apply(
         self,
@@ -109,6 +114,10 @@ class HFChatTemplate:
         add_generation_prompt: bool = True,
     ) -> TemplateResult:
         """Apply the chat template to messages using HuggingFace's native formatting."""
+        extra_kwargs: Dict[str, Any] = {}
+        if self._enable_thinking is not None:
+            extra_kwargs["enable_thinking"] = self._enable_thinking
+
         # Use HuggingFace's apply_chat_template directly - it handles
         # model-specific tool formatting automatically
         if tools:
@@ -117,12 +126,14 @@ class HFChatTemplate:
                 tools=tools,
                 add_generation_prompt=add_generation_prompt,
                 tokenize=True,
+                **extra_kwargs,
             )
         else:
             prompt_token_ids = self._tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=add_generation_prompt,
                 tokenize=True,
+                **extra_kwargs,
             )
 
         prompt_token_ids = list(prompt_token_ids)
