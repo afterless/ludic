@@ -366,7 +366,34 @@ class CheckpointManager:
             )
         else:
             state_dict = self._read_state_dict(ckpt_dir)
-            model.load_state_dict(state_dict)
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            if unexpected:
+                raise RuntimeError(
+                    f"Unexpected keys in checkpoint {ckpt_dir}: {unexpected}"
+                )
+            if missing:
+                # save_pretrained deduplicates tied weights (e.g. lm_head.weight
+                # shares storage with embed_tokens.weight). Re-tie them now.
+                if hasattr(model, "tie_weights"):
+                    model.tie_weights()
+                # load_state_dict copies data in-place, so model tensor data_ptrs
+                # are unchanged by the load. After tie_weights(), a "missing" key
+                # is resolved iff it now aliases a key that WAS loaded.
+                post_sd = model.state_dict()
+                missing_set = set(missing)
+                loaded_ptrs = {
+                    post_sd[k].data_ptr()
+                    for k in post_sd
+                    if k not in missing_set
+                }
+                still_missing = [
+                    k for k in missing
+                    if post_sd[k].data_ptr() not in loaded_ptrs
+                ]
+                if still_missing:
+                    raise RuntimeError(
+                        f"Missing non-tied keys in checkpoint {ckpt_dir}: {still_missing}"
+                    )
 
         meta_path = ckpt_dir / "trainer_state.json"
         if meta_path.exists():

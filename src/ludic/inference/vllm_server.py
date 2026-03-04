@@ -339,7 +339,7 @@ async def run_server(args: Namespace) -> None:
     # --------------------------------------------------------------
     try:
         tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-        think_ids = tokenizer.encode("</think>", add_special_tokens=False)
+        think_ids = tokenizer.encode("Okay, time is up. Let me stop thinking and formulate a final answer now. </think>", add_special_tokens=False)
         vllm_config.additional_config["think_ids"] = think_ids
     except Exception as e:
         raise RuntimeError(
