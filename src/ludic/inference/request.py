@@ -73,6 +73,7 @@ class TokenCompletionRequest:
     model: str
     prompt_token_ids: List[int]
     prompt_text: Optional[str] = None  # For debugging/logging
+    stop_token_ids: Optional[List[int]] = None
     sampling: SamplingParams = field(default_factory=SamplingParams)
     return_: ReturnSpec = field(default_factory=ReturnSpec)
     seed: Optional[int] = None

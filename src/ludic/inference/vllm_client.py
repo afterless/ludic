@@ -177,8 +177,17 @@ class VLLMChatClient(ChatClient):
                     f"{getattr(ext, 'kind', None)!r} (type={type(ext).__name__}); expected VLLMExtensions."
                 )
 
+        if request.stop_token_ids:
+            extra_body["stop_token_ids"] = [int(token_id) for token_id in request.stop_token_ids]
+
         # Token IDs - always request for token-in/token-out consistency
         extra_body["return_token_ids"] = True
+
+        # Preserve special tokens in decoded text so chat-template-native
+        # reasoning channels (Gemma's <|channel>thought<channel|>) and
+        # tool-call envelopes (<|tool_call>...<tool_call|>) remain visible
+        # to client-side parsers.
+        extra_body["skip_special_tokens"] = False
 
         # Request chosen-token logprobs if asked
         if request.return_.return_chosen_logprobs:

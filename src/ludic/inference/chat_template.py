@@ -8,6 +8,7 @@ the library and inference backend.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, TYPE_CHECKING
 
@@ -29,6 +30,7 @@ class TemplateResult:
 
     prompt_token_ids: List[int]
     prompt_text: str
+    stop_token_ids: Optional[List[int]] = None
 
 
 class ChatTemplate(Protocol):
@@ -92,6 +94,7 @@ class HFChatTemplate:
         *,
         tool_parser: Optional[ToolParser] = None,
         enable_thinking: Optional[bool] = None,
+        default_tools: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """
         Args:
@@ -101,10 +104,15 @@ class HFChatTemplate:
             enable_thinking: If set, passes enable_thinking to apply_chat_template.
                             Use False to disable chain-of-thought on models that support
                             it (e.g. Qwen3). None means the kwarg is not passed at all.
+            default_tools: Tool schemas (OpenAI function-calling format) passed to
+                            apply_chat_template when the caller doesn't supply tools
+                            explicitly. Required for chat templates that drop role:tool
+                            messages when tools= is unset (e.g. Gemma 4).
         """
         self._tokenizer = tokenizer
         self._tool_parser = tool_parser
         self._enable_thinking = enable_thinking
+        self._default_tools = list(default_tools or [])
 
     def apply(
         self,
@@ -118,31 +126,46 @@ class HFChatTemplate:
         if self._enable_thinking is not None:
             extra_kwargs["enable_thinking"] = self._enable_thinking
 
+        effective_tools = tools if tools is not None else self._default_tools
+
         # Use HuggingFace's apply_chat_template directly - it handles
         # model-specific tool formatting automatically
-        if tools:
-            prompt_token_ids = self._tokenizer.apply_chat_template(
+        if effective_tools:
+            rendered = self._tokenizer.apply_chat_template(
                 messages,
-                tools=tools,
+                tools=effective_tools,
                 add_generation_prompt=add_generation_prompt,
                 tokenize=True,
                 **extra_kwargs,
             )
         else:
-            prompt_token_ids = self._tokenizer.apply_chat_template(
+            rendered = self._tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=add_generation_prompt,
                 tokenize=True,
                 **extra_kwargs,
             )
 
-        prompt_token_ids = list(prompt_token_ids)
+        prompt_token_ids = self._normalize_template_output(rendered)
         prompt_text = self._tokenizer.decode(prompt_token_ids)
 
         return TemplateResult(
             prompt_token_ids=prompt_token_ids,
             prompt_text=prompt_text,
         )
+
+    def _normalize_template_output(self, rendered: Any) -> List[int]:
+        if isinstance(rendered, str):
+            return self._tokenizer.encode(rendered, add_special_tokens=False)
+        if isinstance(rendered, Mapping):
+            rendered = rendered["input_ids"]
+        if hasattr(rendered, "tolist"):
+            rendered = rendered.tolist()
+        if rendered and isinstance(rendered[0], list):
+            if len(rendered) != 1:
+                raise ValueError("Expected one chat template sequence, got a batch.")
+            rendered = rendered[0]
+        return [int(token_id) for token_id in rendered]
 
     def parse_tool_calls(
         self,

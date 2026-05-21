@@ -162,6 +162,7 @@ class Agent:
             model=self._model,
             prompt_token_ids=template_result.prompt_token_ids,
             prompt_text=template_result.prompt_text,
+            stop_token_ids=template_result.stop_token_ids,
             sampling=inf.sampling,
             return_=inf.return_,
             seed=sampling_seed,
@@ -179,6 +180,23 @@ class Agent:
         last_info: Dict[str, Any] = dict(public_info)
         # Store prompt and completion for logging/training
         last_info["chat_prompt_messages"] = messages
+        raw_completion_text = resp.text
+        parse_completion = getattr(self._chat_template, "parse_completion", None)
+        if callable(parse_completion):
+            parsed_text, parse_info = parse_completion(
+                completion_token_ids=resp.completion_token_ids,
+                completion_text=raw_completion_text,
+            )
+            resp = ChatResponse(
+                text=parsed_text,
+                finish_reason=resp.finish_reason,
+                completion_token_ids=resp.completion_token_ids,
+                prompt_token_ids=resp.prompt_token_ids,
+                completion_logprobs=resp.completion_logprobs,
+            )
+            last_info["renderer_raw_completion"] = raw_completion_text
+            last_info["renderer_parse"] = parse_info
+
         last_info["chat_completion"] = {"role": "assistant", "content": resp.text}
         resp.merge_into_info(last_info)
 

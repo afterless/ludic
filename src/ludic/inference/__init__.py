@@ -7,6 +7,7 @@ from .extensions import BackendExtensions, VLLMExtensions
 from .vllm_client import VLLMChatClient
 from .vllm_utils import start_vllm_server, wait_for_vllm_health
 from .chat_template import ChatTemplate, HFChatTemplate, TemplateResult
+from .renderer_template import Gemma4ChatTemplate, PrimeRendererChatTemplate
 from .tool_parser import ToolParser, HermesToolParser, ToolParseResult
 
 __all__ = [
@@ -30,6 +31,8 @@ __all__ = [
     # Token-in API
     "ChatTemplate",
     "HFChatTemplate",
+    "Gemma4ChatTemplate",
+    "PrimeRendererChatTemplate",
     "TemplateResult",
     "ToolParser",
     "HermesToolParser",

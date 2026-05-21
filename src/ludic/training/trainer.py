@@ -80,6 +80,8 @@ class Trainer:
         train_logger: Optional[TrainingLogger] = None,
         reducers: Optional[Mapping[str, Reducer]] = None,
         evaluator: Optional[Evaluator] = None,
+        cp_mesh: Optional[object] = None,
+        cp_loss_fn: Optional[Callable] = None,
     ) -> None:
         """
         Args:
@@ -140,6 +142,8 @@ class Trainer:
         self.cfg = cfg
         self.train_logger = train_logger
         self.reducers = reducers
+        self.cp_mesh = cp_mesh
+        self.cp_loss_fn = cp_loss_fn
 
         # Assume caller has already done any FSDP wrapping / device placement.
         # We do NOT unconditionally .to(device) for FSDP; that’s the caller’s job.
@@ -576,11 +580,20 @@ class Trainer:
             pre_forward_alloc = self._reset_peak_memory(device) if profile_memory else None
 
             try:
-                loss, stats = self.algo.compute_loss(
-                    self.model,
-                    batch_tensors,
-                    cast_logits_to_fp32=self.cfg.cast_logits_to_fp32,
-                )
+                if self.cp_mesh is not None and self.cp_loss_fn is not None:
+                    loss, stats = self.cp_loss_fn(
+                        self.model,
+                        batch_tensors,
+                        self.algo,
+                        self.cp_mesh,
+                        cast_logits_to_fp32=self.cfg.cast_logits_to_fp32,
+                    )
+                else:
+                    loss, stats = self.algo.compute_loss(
+                        self.model,
+                        batch_tensors,
+                        cast_logits_to_fp32=self.cfg.cast_logits_to_fp32,
+                    )
 
                 # Scale loss by micro-batch size to preserve macro-batch mean.
                 scaled_loss = loss * (item_count / total_items)
