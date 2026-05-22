@@ -481,6 +481,9 @@ class Trainer:
 
         all_micro_stats: List[Dict[str, Tensor]] = []
         all_saw_batches: List[SAWBatch] = []
+        # Full pre-drop_zero generated population, captured for accurate outcome
+        # metrics (drop_zero is a training filter, not a generation outcome).
+        all_outcome_batches: List[SAWBatch] = []
 
         # ---- 1) Fetch Macro-Batch ---------------------------------------
 
@@ -508,6 +511,14 @@ class Trainer:
                 # Update the batch with only fresh items
                 saw_batch.items = fresh_items
 
+            # Snapshot the full generated population BEFORE algo.preprocess
+            # (drop_zero). Outcome metrics (compliance/reward/protocol rates)
+            # must describe what the model generated this step, not the
+            # surviving training subset. Taken after max_lag so it reflects
+            # fresh, current-policy rollouts.
+            outcome_items = list(saw_batch.items)
+            outcome_meta = dict(saw_batch.meta)
+
             # Algorithm-specific preprocessing (CPU-side) before collation.
             if self.algo.preprocess is not None:
                 saw_batch = self.algo.preprocess(saw_batch)
@@ -530,6 +541,7 @@ class Trainer:
             break
 
         all_saw_batches.append(saw_batch)
+        all_outcome_batches.append(SAWBatch(items=outcome_items, meta=outcome_meta))
 
         micro_chunks = split_items_by_token_budget(
             saw_batch.items,
@@ -678,6 +690,7 @@ class Trainer:
             all_saw_batches,
             reducers=self.reducers,
             micro_batch_sizes=[len(chunk) for chunk in micro_chunks],
+            reducer_batches=all_outcome_batches,
         )
         if grad_norm is not None:
             final_stats["grad_norm"] = float(grad_norm)

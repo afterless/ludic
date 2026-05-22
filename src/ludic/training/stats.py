@@ -74,6 +74,7 @@ def aggregate_stats(
     *,
     reducers: Mapping[str, Reducer] | None = None,
     micro_batch_sizes: Optional[List[int]] = None,
+    reducer_batches: Optional[List[SAWBatch]] = None,
 ) -> Dict[str, float]:
     """
     Aggregate micro-batch stats with batch-level metadata and optional reducers.
@@ -90,6 +91,12 @@ def aggregate_stats(
         - avg_total_reward: item-weighted average of batch.meta["avg_total_reward"]
         - avg_completion_length: item-weighted average of batch.meta["avg_completion_length"]
     Plus any keys produced by `reducers`.
+
+    If `reducer_batches` is provided, the custom `reducers` are evaluated over
+    that population instead of `saw_batches`. This is used to report descriptive
+    outcome metrics (compliance/reward/protocol rates) over the full, pre-filter
+    generated rollouts while loss/grad/count stats remain tied to the trained
+    (post-preprocess) batch.
     """
     if not micro_stats_list:
         return {}
@@ -189,8 +196,24 @@ def aggregate_stats(
 
     # 3) Custom reducers (optional)
     if reducers:
-        # Flatten items once for convenience
-        items: List[SAWItem] = [item for batch in saw_batches for item in batch.items]
+        # Descriptive (outcome) metrics are computed over `reducer_batches` when
+        # provided — e.g. the full pre-drop_zero generated population — so that
+        # reported rates reflect what the model generated, not the drop_zero-
+        # filtered training subset. Falls back to the trained batches.
+        reducer_source = reducer_batches if reducer_batches is not None else saw_batches
+        items: List[SAWItem] = [item for batch in reducer_source for item in batch.items]
+
+        if reducer_batches is not None:
+            reducer_total_samples = float(sum(len(b.items) for b in reducer_source))
+            reducer_total_rollouts = float(
+                sum(
+                    (b.meta.get("target_rollouts") or b.meta.get("batch_size", 0.0))
+                    for b in reducer_source
+                )
+            )
+        else:
+            reducer_total_samples = total_samples
+            reducer_total_rollouts = total_target_rollouts
 
         for name, reducer in reducers.items():
             values: List[object] = []
@@ -212,9 +235,9 @@ def aggregate_stats(
                 raise ValueError(f"Unknown reducer kind: {reducer.kind}")
 
             if reducer.normalize_by == "samples":
-                denom = total_samples
+                denom = reducer_total_samples
             elif reducer.normalize_by == "rollouts":
-                denom = total_target_rollouts
+                denom = reducer_total_rollouts
             else:
                 denom = None
 

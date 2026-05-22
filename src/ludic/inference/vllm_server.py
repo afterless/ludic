@@ -297,6 +297,29 @@ class GlobalThinkProcessor(V1LogitsProcessor):
 # ---------------------------------------------------------------------------
 
 
+def _thinking_close_ids(tokenizer) -> list[int]:
+    """Token id(s) that close the model's reasoning channel, used by
+    GlobalThinkProcessor to force-stop thinking at the max_think budget.
+
+    Model-agnostic: prefer the model's NATIVE end-of-reasoning marker that maps
+    to a single special token (e.g. Gemma's `<channel|>` closes the thought
+    channel = token 101; Qwen/Hermes `</think>`). We force ONLY the close token
+    and inject NO natural-language text — the previous hardcoded
+    "Okay, time is up ... </think>" was Qwen-only syntax (mere text for Gemma, so
+    it never closed the channel) and its lowercase words corrupted
+    reasoning-format side tasks (e.g. uppercase-CoT) by polluting reasoning_content.
+    """
+    for marker in ("<channel|>", "</think>", "<|im_end|>", "<|eot_id|>"):
+        try:
+            ids = tokenizer.encode(marker, add_special_tokens=False)
+        except Exception:
+            continue
+        if len(ids) == 1:  # native single special token for this chat template
+            return ids
+    # Fallback: legacy textual close when no native single-token marker exists.
+    return tokenizer.encode("</think>", add_special_tokens=False)
+
+
 async def run_server(args: Namespace) -> None:
     sock_addr = (args.host or "0.0.0.0", args.port)
     sock = create_server_socket(sock_addr)
@@ -313,9 +336,14 @@ async def run_server(args: Namespace) -> None:
     # ----------------------------------------------------------------------
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
-    # Wire worker extension
-    worker_ext = "ludic.inference.vllm_server.WeightSyncWorkerExtension"
-    engine_args.worker_extension_cls = worker_ext
+    # Wire worker extension. Respect a CLI-provided --worker-extension-cls
+    # (e.g. checkpoint_engine.worker.VllmColocateWorkerExtension for the
+    # checkpoint-engine P2P weight-sync path); otherwise default to ludic's
+    # NCCL-broadcast WeightSyncWorkerExtension.
+    if not getattr(engine_args, "worker_extension_cls", None):
+        engine_args.worker_extension_cls = (
+            "ludic.inference.vllm_server.WeightSyncWorkerExtension"
+        )
 
     # Wire our GlobalThinkProcessor into the engine-wide logits processor list.
     # If user already passed --logits-processors, append ours.
@@ -339,11 +367,11 @@ async def run_server(args: Namespace) -> None:
     # --------------------------------------------------------------
     try:
         tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-        think_ids = tokenizer.encode("Okay, time is up. Let me stop thinking and formulate a final answer now. </think>", add_special_tokens=False)
+        think_ids = _thinking_close_ids(tokenizer)
         vllm_config.additional_config["think_ids"] = think_ids
     except Exception as e:
         raise RuntimeError(
-            f"Failed to pre-tokenize '</think>' for model "
+            f"Failed to resolve the reasoning-close token for model "
             f"{vllm_config.model_config.model}: {e}"
         ) from e
 
@@ -466,6 +494,38 @@ async def run_server(args: Namespace) -> None:
         create_background_task(do_update_batch())
         return {"status": "ok"}
 
+    @app.post("/collective_rpc")
+    async def collective_rpc_endpoint(request: Request) -> dict[str, str]:
+        """
+        Synchronous collective_rpc passthrough for checkpoint-engine.
+
+        checkpoint-engine's ParameterServer.update() drives the vLLM-side weight
+        pull by POSTing here (via `request_inference_to_update`) with body:
+          { "method": "update_weights_from_ipc", "args": [socket_paths], "timeout": float }
+        This MUST block until every worker has applied the update — checkpoint-engine
+        relies on the synchronous return to know its IPC buffers are safe to release.
+        """
+        data = await request.json()
+        method = data.get("method")
+        rpc_args = tuple(data.get("args", []))
+        if not method:
+            return {"status": "error", "detail": "missing 'method'"}
+
+        await engine.pause_generation(
+            wait_for_inflight_requests=True,
+            clear_cache=False,
+        )
+        async with weight_update_lock:
+            try:
+                await engine.collective_rpc(method, args=rpc_args)
+                await engine.reset_prefix_cache()
+                global RUNTIME_VERSION
+                async with RUNTIME_VERSION_LOCK:
+                    RUNTIME_VERSION += 1
+            finally:
+                await engine.resume_generation()
+        return {"status": "ok"}
+
     @app.post("/sync_weights")
     async def sync_weights(request: Request) -> dict[str, Any]:
         """
@@ -533,6 +593,13 @@ async def run_server(args: Namespace) -> None:
         """
         await engine.collective_rpc("close_communicator")
         return {"status": "ok"}
+
+    @app.post("/shutdown")
+    async def shutdown() -> dict[str, str]:
+        # Self-SIGTERM after the response flushes; trips the graceful handler above.
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM))
+        return {"status": "shutting down"}
 
     # ------------------------ start HTTP server --------------------------
 
