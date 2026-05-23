@@ -104,25 +104,6 @@ class WeightSyncWorkerExtension:
         # client rank is the last rank in the world (host process)
         self.client_rank = world_size - 1
 
-        # --- DEBUG: Print internal vLLM parameter names ---
-        # This executes on the worker process. We use Rank 0 to avoid duplicates.
-        if self.pynccl_comm.rank == 0:
-            print("\n" + "="*60)
-            print("🔍 [DEBUG] vLLM Internal Parameter Names (Worker Rank 0)")
-            print("="*60)
-            try:
-                # Access the underlying torch model
-                model_instance = self.model_runner.model
-                count = 0
-                for name, _ in model_instance.named_parameters():
-                    print(f"   • {name}")
-                    count += 1
-                print(f"Total parameters found: {count}")
-            except Exception as e:
-                print(f"⚠️ Could not print parameter names: {e}")
-            print("="*60 + "\n")
-        # --------------------------------------------------
-
     def update_named_param(self, name: str, dtype: str, shape: Sequence[int]) -> None:
         """
         Called via engine.collective_rpc on all workers.
@@ -336,14 +317,10 @@ async def run_server(args: Namespace) -> None:
     # ----------------------------------------------------------------------
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
-    # Wire worker extension. Respect a CLI-provided --worker-extension-cls
-    # (e.g. checkpoint_engine.worker.VllmColocateWorkerExtension for the
-    # checkpoint-engine P2P weight-sync path); otherwise default to ludic's
-    # NCCL-broadcast WeightSyncWorkerExtension.
-    if not getattr(engine_args, "worker_extension_cls", None):
-        engine_args.worker_extension_cls = (
-            "ludic.inference.vllm_server.WeightSyncWorkerExtension"
-        )
+    # Wire ludic's NCCL-broadcast weight-sync worker extension.
+    engine_args.worker_extension_cls = (
+        "ludic.inference.vllm_server.WeightSyncWorkerExtension"
+    )
 
     # Wire our GlobalThinkProcessor into the engine-wide logits processor list.
     # If user already passed --logits-processors, append ours.
@@ -492,38 +469,6 @@ async def run_server(args: Namespace) -> None:
                     await engine.resume_generation()
 
         create_background_task(do_update_batch())
-        return {"status": "ok"}
-
-    @app.post("/collective_rpc")
-    async def collective_rpc_endpoint(request: Request) -> dict[str, str]:
-        """
-        Synchronous collective_rpc passthrough for checkpoint-engine.
-
-        checkpoint-engine's ParameterServer.update() drives the vLLM-side weight
-        pull by POSTing here (via `request_inference_to_update`) with body:
-          { "method": "update_weights_from_ipc", "args": [socket_paths], "timeout": float }
-        This MUST block until every worker has applied the update — checkpoint-engine
-        relies on the synchronous return to know its IPC buffers are safe to release.
-        """
-        data = await request.json()
-        method = data.get("method")
-        rpc_args = tuple(data.get("args", []))
-        if not method:
-            return {"status": "error", "detail": "missing 'method'"}
-
-        await engine.pause_generation(
-            wait_for_inflight_requests=True,
-            clear_cache=False,
-        )
-        async with weight_update_lock:
-            try:
-                await engine.collective_rpc(method, args=rpc_args)
-                await engine.reset_prefix_cache()
-                global RUNTIME_VERSION
-                async with RUNTIME_VERSION_LOCK:
-                    RUNTIME_VERSION += 1
-            finally:
-                await engine.resume_generation()
         return {"status": "ok"}
 
     @app.post("/update_lora")
