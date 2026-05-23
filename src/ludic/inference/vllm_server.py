@@ -473,15 +473,8 @@ async def run_server(args: Namespace) -> None:
 
     @app.post("/update_lora")
     async def update_lora(request: Request) -> dict[str, str]:
-        """
-        LoRA-only weight sync: hot-swap the served 'policy' adapter.
-
-        Body: { "lora_name": "policy", "lora_path": "/abs/dir", "version": int }
-        The dir holds a PEFT adapter (adapter_config.json + adapter_model.safetensors).
-        Synchronous: blocks until the swap completes so the trainer knows the new
-        policy is live. Requires the server launched with --enable-lora and
-        VLLM_ALLOW_RUNTIME_LORA_UPDATING=True.
-        """
+        """Hot-swap the served 'policy' LoRA adapter from a PEFT dir on shared FS.
+        Body: {lora_name, lora_path, version}. Needs --enable-lora + VLLM_ALLOW_RUNTIME_LORA_UPDATING."""
         from vllm.entrypoints.serve.lora.protocol import (
             LoadLoRAAdapterRequest,
             UnloadLoRAAdapterRequest,

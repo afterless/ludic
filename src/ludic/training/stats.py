@@ -92,11 +92,8 @@ def aggregate_stats(
         - avg_completion_length: item-weighted average of batch.meta["avg_completion_length"]
     Plus any keys produced by `reducers`.
 
-    If `reducer_batches` is provided, the custom `reducers` are evaluated over
-    that population instead of `saw_batches`. This is used to report descriptive
-    outcome metrics (compliance/reward/protocol rates) over the full, pre-filter
-    generated rollouts while loss/grad/count stats remain tied to the trained
-    (post-preprocess) batch.
+    If `reducer_batches` is given, `reducers` run over it (e.g. the pre-drop_zero
+    generated rollouts) instead of `saw_batches`; loss/count stats stay post-drop.
     """
     if not micro_stats_list:
         return {}
@@ -196,10 +193,7 @@ def aggregate_stats(
 
     # 3) Custom reducers (optional)
     if reducers:
-        # Descriptive (outcome) metrics are computed over `reducer_batches` when
-        # provided — e.g. the full pre-drop_zero generated population — so that
-        # reported rates reflect what the model generated, not the drop_zero-
-        # filtered training subset. Falls back to the trained batches.
+        # Run reducers over the pre-drop population when given, else the trained batch.
         reducer_source = reducer_batches if reducer_batches is not None else saw_batches
         items: List[SAWItem] = [item for batch in reducer_source for item in batch.items]
 
