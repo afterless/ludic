@@ -526,6 +526,55 @@ async def run_server(args: Namespace) -> None:
                 await engine.resume_generation()
         return {"status": "ok"}
 
+    @app.post("/update_lora")
+    async def update_lora(request: Request) -> dict[str, str]:
+        """
+        LoRA-only weight sync: hot-swap the served 'policy' adapter.
+
+        Body: { "lora_name": "policy", "lora_path": "/abs/dir", "version": int }
+        The dir holds a PEFT adapter (adapter_config.json + adapter_model.safetensors).
+        Synchronous: blocks until the swap completes so the trainer knows the new
+        policy is live. Requires the server launched with --enable-lora and
+        VLLM_ALLOW_RUNTIME_LORA_UPDATING=True.
+        """
+        from vllm.entrypoints.serve.lora.protocol import (
+            LoadLoRAAdapterRequest,
+            UnloadLoRAAdapterRequest,
+        )
+
+        data = await request.json()
+        name = data.get("lora_name", "policy")
+        path = data.get("lora_path")
+        forced_version = data.get("version")
+        if not path:
+            return {"status": "error", "detail": "missing 'lora_path'"}
+
+        sm = app.state.openai_serving_models
+        await engine.pause_generation(
+            wait_for_inflight_requests=True,
+            clear_cache=False,
+        )
+        async with weight_update_lock:
+            try:
+                # Unload the previous version (no-op/ignored on the first sync).
+                try:
+                    await sm.unload_lora_adapter(UnloadLoRAAdapterRequest(lora_name=name))
+                except Exception:
+                    pass
+                await sm.load_lora_adapter(
+                    LoadLoRAAdapterRequest(lora_name=name, lora_path=path)
+                )
+                await engine.reset_prefix_cache()
+                global RUNTIME_VERSION
+                async with RUNTIME_VERSION_LOCK:
+                    if forced_version is not None:
+                        RUNTIME_VERSION = int(forced_version)
+                    else:
+                        RUNTIME_VERSION += 1
+            finally:
+                await engine.resume_generation()
+        return {"status": "ok"}
+
     @app.post("/sync_weights")
     async def sync_weights(request: Request) -> dict[str, Any]:
         """
