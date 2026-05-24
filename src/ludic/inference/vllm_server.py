@@ -3,7 +3,7 @@ import os
 import signal
 import sys
 from argparse import Namespace
-from typing import Any, Sequence, Set, Optional, Tuple
+from typing import Any, Set, Optional
 from collections.abc import Coroutine
 
 # Use V1 engine explicitly.
@@ -14,9 +14,6 @@ import torch
 import uvloop
 from fastapi import FastAPI, Request
 from vllm import SamplingParams
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.parallel_state import get_world_group
-from vllm.distributed.utils import StatelessProcessGroup
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.launcher import serve_http
@@ -59,108 +56,6 @@ def create_background_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
     return task
-
-
-# ---------------------------------------------------------------------------
-# Worker extension: NCCL-based weight sync
-# ---------------------------------------------------------------------------
-
-
-class WeightSyncWorkerExtension:
-    """
-    vLLM worker extension for weight synchronization.
-
-    Each worker:
-      - joins a StatelessProcessGroup (TCP)
-      - wraps it in a PyNcclCommunicator (NCCL)
-      - receives updated weights via broadcast() from the client rank
-      - calls `model_runner.model.load_weights` with the new tensors
-    """
-
-    pynccl_comm: PyNcclCommunicator | None = None
-    client_rank: int | None = None
-    device: torch.device | None = None
-
-    def init_communicator(self, host: str, port: int, world_size: int) -> None:
-        """
-        Called via engine.collective_rpc on all workers.
-        Creates the NCCL communicator for weight updates.
-        """
-        if self.pynccl_comm is not None:
-            raise RuntimeError(
-                "Weight update group already initialized. "
-                "Call close_communicator() first."
-            )
-
-        rank = get_world_group().rank
-        pg = StatelessProcessGroup.create(
-            host=host,
-            port=port,
-            rank=rank,
-            world_size=world_size,
-        )
-        assert self.device is not None, "WeightSyncWorkerExtension.device must be set"
-        self.pynccl_comm = PyNcclCommunicator(pg, device=self.device)
-        # client rank is the last rank in the world (host process)
-        self.client_rank = world_size - 1
-
-    def update_named_param(self, name: str, dtype: str, shape: Sequence[int]) -> None:
-        """
-        Called via engine.collective_rpc on all workers.
-        Receives a single parameter tensor via NCCL broadcast and loads it.
-        """
-        if self.pynccl_comm is None or self.client_rank is None:
-            raise RuntimeError(
-                "Communicator not initialized. Call `init_communicator` first."
-            )
-
-        torch_dtype = getattr(torch, dtype.split(".")[-1])
-        assert self.device is not None
-        weight = torch.empty(shape, dtype=torch_dtype, device=self.device)
-        self.pynccl_comm.broadcast(weight, src=self.client_rank)
-        self.pynccl_comm.group.barrier()
-        # vLLM model runner will apply the incoming weights
-        self.model_runner.model.load_weights(weights=[(name, weight)])  # type: ignore[attr-defined]
-
-    def update_param_batch(
-        self, metadata_list: Sequence[Tuple[str, str, Sequence[int]]]
-    ) -> None:
-        """
-        Called via engine.collective_rpc on all workers.
-        Iterates through the list, creating empty tensors and receiving broadcasts.
-        """
-        if self.pynccl_comm is None or self.client_rank is None:
-            raise RuntimeError(
-                "Communicator not initialized. Call `init_communicator` first."
-            )
-
-        assert self.device is not None
-
-        for name, dtype_str, shape_list in metadata_list:
-            torch_dtype = getattr(torch, dtype_str.split(".")[-1])
-            shape = tuple(shape_list)
-
-            # allocate empty on GPU
-            weight = torch.empty(shape, dtype=torch_dtype, device=self.device)
-
-            # NCCL Receive
-            self.pynccl_comm.broadcast(weight, src=self.client_rank)
-
-            # Apply
-            # vLLM model runner will apply the incoming weights
-            self.model_runner.model.load_weights(weights=[(name, weight)])  # type: ignore[attr-defined]
-
-        # Barrier to ensure all workers are done
-        self.pynccl_comm.group.barrier()
-
-    def close_communicator(self) -> None:
-        """
-        Called via engine.collective_rpc to tear down communicator state.
-        """
-        if self.pynccl_comm is not None:
-            del self.pynccl_comm
-            self.pynccl_comm = None
-            self.client_rank = None
 
 
 # ---------------------------------------------------------------------------
@@ -317,11 +212,6 @@ async def run_server(args: Namespace) -> None:
     # ----------------------------------------------------------------------
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
-    # Wire ludic's NCCL-broadcast weight-sync worker extension.
-    engine_args.worker_extension_cls = (
-        "ludic.inference.vllm_server.WeightSyncWorkerExtension"
-    )
-
     # Wire our GlobalThinkProcessor into the engine-wide logits processor list.
     # If user already passed --logits-processors, append ours.
     think_proc = "ludic.inference.vllm_server:GlobalThinkProcessor"
@@ -373,103 +263,9 @@ async def run_server(args: Namespace) -> None:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/get_world_size")
-    async def get_world_size() -> dict[str, int]:
-        return {
-            "world_size": args.tensor_parallel_size * args.data_parallel_size
-        }
-
     @app.get("/runtime_version")
     async def runtime_version() -> dict[str, int]:
         return {"version": RUNTIME_VERSION}
-
-    @app.post("/init_communicator")
-    async def init_communicator(request: Request) -> dict[str, str]:
-        """
-        Client tells all workers to join a weight-sync process group.
-        """
-        data = await request.json()
-        host = data.get("host")
-        port = data.get("port")
-        world_size = data.get("world_size")
-
-        create_background_task(
-            engine.collective_rpc(
-                "init_communicator", args=(host, port, world_size)
-            )
-        )
-        return {"status": "ok"}
-
-    @app.post("/update_named_param")
-    async def update_named_param(request: Request) -> dict[str, str]:
-        """
-        Update a single named parameter.
-
-        Client side:
-          1) POST name/dtype/shape here
-          2) Immediately run NCCL broadcast(weights, src=client_rank)
-
-        Worker side:
-          - allocates empty tensor of given shape/dtype
-          - calls broadcast(empty, src=client_rank)
-          - loads the received tensor into the model
-        """
-        data = await request.json()
-        name = data.get("name")
-        dtype = data.get("dtype")
-        shape = data.get("shape")
-        shape_tuple = tuple(shape)
-
-        await engine.pause_generation(
-            wait_for_inflight_requests=True,
-            clear_cache=False,
-        )
-
-        async def do_update() -> None:
-            async with weight_update_lock:
-                try:
-                    await engine.collective_rpc(
-                        "update_named_param", args=(name, dtype, shape_tuple)
-                    )
-                finally:
-                    await engine.resume_generation()
-
-        create_background_task(do_update())
-        return {"status": "ok"}
-
-    @app.post("/update_param_batch")
-    async def update_param_batch(request: Request) -> dict[str, str]:
-        """
-        Receives the batch metadata manifest.
-        Triggers the worker extension to enter the receiving loop.
-        """
-        data = await request.json()
-        metadata = data.get("metadata", [])
-        forced_version = data.get("version")
-        rpc_args = [(m["name"], m["dtype"], m["shape"]) for m in metadata]
-
-        await engine.pause_generation(
-            wait_for_inflight_requests=True,
-            clear_cache=False,
-        )
-
-        async def do_update_batch() -> None:
-            async with weight_update_lock:
-                try:
-                    await engine.collective_rpc("update_param_batch", args=(rpc_args,))
-                    await engine.reset_prefix_cache()
-
-                    global RUNTIME_VERSION
-                    async with RUNTIME_VERSION_LOCK:
-                        if forced_version is not None:
-                            RUNTIME_VERSION = int(forced_version)
-                        else:
-                            RUNTIME_VERSION += 1
-                finally:
-                    await engine.resume_generation()
-
-        create_background_task(do_update_batch())
-        return {"status": "ok"}
 
     @app.post("/update_lora")
     async def update_lora(request: Request) -> dict[str, str]:
@@ -513,54 +309,6 @@ async def run_server(args: Namespace) -> None:
                 await engine.resume_generation()
         return {"status": "ok"}
 
-    @app.post("/sync_weights")
-    async def sync_weights(request: Request) -> dict[str, Any]:
-        """
-        Optional batched update endpoint.
-
-        Body: { "params": [ {name, dtype, shape}, ... ], "version": "optional-tag" }
-
-        Semantics:
-          - Schedules a background task that calls update_named_param for each param.
-          - Bumps RUNTIME_VERSION once all workers have processed the batch.
-          - HTTP returns immediately after scheduling; client can poll
-            /get_num_background_tasks or /runtime_version if it wants to wait.
-        """
-        data = await request.json()
-        params = data.get("params", [])
-        requested_version = data.get("version")
-
-        await engine.pause_generation(
-            wait_for_inflight_requests=True,
-            clear_cache=False,
-        )
-
-        async def do_update() -> None:
-            async with weight_update_lock:
-                try:
-                    for p in params:
-                        name = p["name"]
-                        dtype = p["dtype"]
-                        shape = tuple(p["shape"])
-                        await engine.collective_rpc(
-                            "update_named_param", args=(name, dtype, shape)
-                        )
-
-                    global RUNTIME_VERSION
-                    async with RUNTIME_VERSION_LOCK:
-                        if requested_version is not None:
-                            try:
-                                RUNTIME_VERSION = int(requested_version)
-                            except ValueError:
-                                RUNTIME_VERSION += 1
-                        else:
-                            RUNTIME_VERSION += 1
-                finally:
-                    await engine.resume_generation()
-
-        create_background_task(do_update())
-        return {"status": "ok", "requested_version": requested_version}
-
     @app.post("/reset_prefix_cache")
     async def reset_prefix_cache() -> dict[str, str]:
         """
@@ -572,14 +320,6 @@ async def run_server(args: Namespace) -> None:
     @app.post("/get_num_background_tasks")
     async def get_num_background_tasks() -> dict[str, int]:
         return {"num_background_tasks": len(background_tasks)}
-
-    @app.post("/close_communicator")
-    async def close_communicator() -> dict[str, str]:
-        """
-        Tear down NCCL communicator on all workers.
-        """
-        await engine.collective_rpc("close_communicator")
-        return {"status": "ok"}
 
     @app.post("/shutdown")
     async def shutdown() -> dict[str, str]:
