@@ -305,12 +305,21 @@ class Gemma4ChatTemplate:
         )
 
     def _render_assistant_message(self, message: Message) -> str:
+        # Past assistant turns must include the thought channel so multi-turn history
+        # matches what the model emits naturally. No explicit <channel|> close — the
+        # next piece (tool_call envelope or content) serves as the implicit boundary,
+        # matching _THOUGHT_RE's lookahead so round-tripping recovers the same reasoning.
+        pieces: List[str] = []
+        if reasoning := message.get("reasoning_content"):
+            pieces.append(f"<|channel>thought\n{reasoning}")
         content = _content_to_text(message.get("content"))
         if tool_calls := message.get("tool_calls"):
-            return "".join(self._render_openai_tool_call(call) for call in tool_calls)
-        if xml_call := self._tool_call_from_xml(content):
-            return self._render_openai_tool_call(xml_call)
-        return content.strip()
+            pieces.append("".join(self._render_openai_tool_call(call) for call in tool_calls))
+        elif xml_call := self._tool_call_from_xml(content):
+            pieces.append(self._render_openai_tool_call(xml_call))
+        else:
+            pieces.append(content.strip())
+        return "".join(pieces)
 
     def _render_openai_tool_call(self, call: Dict[str, Any]) -> str:
         function = call.get("function", call)

@@ -126,3 +126,58 @@ def test_gemma4_renders_prior_xml_tool_call_as_native() -> None:
 
     assert '<|tool_call>call:check_cot_task{answer:<|"|>A<|"|>}' in result.prompt_text
     assert '<|tool_response>response:check_cot_task{value:<|"|>{"both":true}<|"|>}' in result.prompt_text
+
+
+def test_gemma4_renders_past_thought_channel_before_tool_call() -> None:
+    """Past assistant turns with reasoning_content must render the thought channel
+    BEFORE the tool call so the model sees a history matching its own generation
+    format (think → act). Round-tripping the rendered text through parse_completion
+    must recover the original reasoning cleanly (no <channel|> close-marker leak)."""
+    template = Gemma4ChatTemplate(MockGemmaTokenizer())
+    reasoning = "Need to add 2 and 2."
+
+    result = template.apply(
+        [
+            {"role": "user", "content": "What is 2+2?"},
+            {
+                "role": "assistant",
+                "reasoning_content": reasoning,
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "check_math_solution",
+                            "arguments": {"solution": "4"},
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "name": "check_math_solution", "content": '{"is_correct": true}'},
+        ],
+        add_generation_prompt=False,
+    )
+
+    thought_idx = result.prompt_text.find(f"<|channel>thought\n{reasoning}")
+    tool_call_idx = result.prompt_text.find("<|tool_call>call:check_math_solution")
+    assert thought_idx != -1, "past reasoning_content must be emitted in the thought channel"
+    assert tool_call_idx != -1, "tool call must be emitted"
+    assert thought_idx < tool_call_idx, "thought channel must precede the tool call in history"
+    assert "<channel|>" not in result.prompt_text, (
+        "renderer must not emit explicit <channel|> close — _THOUGHT_RE's lookahead "
+        "uses the next piece as the boundary, and an explicit close would leak into "
+        "parsed reasoning_content on round-trip."
+    )
+
+    # Round-trip: the rendered assistant block, parsed back, must recover the reasoning
+    # as a <think>…</think> wrapper with no close-marker leak.
+    assistant_start = result.prompt_text.find("<|channel>thought")
+    assistant_end = result.prompt_text.find("<|tool_response>")
+    assistant_block = result.prompt_text[assistant_start:assistant_end].rstrip()
+    text, info = template.parse_completion(
+        completion_token_ids=[],
+        completion_text=assistant_block,
+    )
+    assert info["success"] is True
+    assert info["tool_calls"] == 1
+    assert f"<think>{reasoning}</think>" in text
+    assert "<channel|>" not in text
