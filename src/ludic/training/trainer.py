@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
@@ -25,6 +28,49 @@ from ludic.eval.evaluator import Evaluator
 from ludic.training.types import SAWBatch, BatchSource
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# LoRA adapter sync to vLLM 
+# ---------------------------------------------------------------------------
+
+_LORA_UPDATE_TIMEOUT_S = 600.0
+_LORA_DEFAULT_TARGET_SUFFIXES = (
+    "q_proj", "k_proj", "v_proj", "o_proj",
+    "gate_proj", "up_proj", "down_proj",
+)
+
+
+@dataclass(frozen=True)
+class LoRASyncConfig:
+    """Inputs for serving LoRA adapters to vLLM via /update_lora.
+
+    When passed to Trainer, the is_peft branch of _push_weights_to_runtime
+    gathers only lora_A/lora_B tensors, writes a PEFT-format adapter dir to
+    `adapter_root/policy_v{step}`, and notifies each `client` to hot-swap the
+    served 'policy' adapter (~1GB push, vs 62GB of merged weights)."""
+    clients: List[Any]
+    adapter_root: str
+    base_model_name: str
+    lora_rank: int
+    lora_alpha: int
+
+
+def _resolve_lora_target_modules(model: nn.Module) -> List[str]:
+    """Read concrete target-module suffixes from the model's PEFT config; fall
+    back to the default set if the config uses 'all-linear'/regex instead of a list."""
+    peft_config = getattr(model, "peft_config", None)
+    if peft_config and "default" in peft_config:
+        modules = peft_config["default"].target_modules
+        if isinstance(modules, (list, tuple, set)) and modules:
+            return sorted(modules)
+    return list(_LORA_DEFAULT_TARGET_SUFFIXES)
+
+
+def _to_peft_key(name: str) -> str:
+    """vLLM expects PEFT's saved-adapter convention: 'base_model.model.' prefix
+    added by PeftModel.save_pretrained, with the '.default' adapter segment stripped."""
+    return "base_model.model." + name.replace(".default", "")
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +128,7 @@ class Trainer:
         evaluator: Optional[Evaluator] = None,
         cp_mesh: Optional[object] = None,
         cp_loss_fn: Optional[Callable] = None,
+        lora_sync: Optional[LoRASyncConfig] = None,
     ) -> None:
         """
         Args:
@@ -151,6 +198,7 @@ class Trainer:
 
         self.algo = algo
         self.publisher = publisher
+        self.lora_sync = lora_sync
         self._batch_source = batch_source
         self.sync_every_steps = (
             self.cfg.sync_every_steps if self.cfg.sync_every_steps and self.cfg.sync_every_steps > 0 else None
@@ -936,93 +984,129 @@ class Trainer:
 
     def _push_weights_to_runtime(self) -> None:
         """
-        Gather weights (handling FSDP if needed) and publish them.
+        Sync the policy to the runtime.
 
-        If the model is a PEFT/LoRA model, we strictly follow the
-        Merge -> Publish -> Unmerge pattern so vLLM receives dense weights
-        but training continues on adapters.
+        - PEFT/LoRA models: gather only lora_A/lora_B tensors collectively, then
+          rank 0 writes a PEFT-format adapter dir and POSTs each vLLM client's
+          /update_lora. Cheap (~1GB) and avoids the merge/CPU-offload dance.
+        - Standard models: gather the full state dict (FSDP-aware) on rank 0
+          and hand off to `self.publisher`.
         """
-        if self.publisher is None:
-            return
-        # Helper to get the underlying model if wrapped in FSDP2
         inner_model = self.model
 
-        # 1. Check if this is a LoRA/PEFT model
-        #    (We use getattr so we don't need to import peft here)
+        # Detect PEFT via merge_adapter/unmerge_adapter so we don't need to import peft.
         merge_fn = getattr(inner_model, "merge_adapter", None)
         unmerge_fn = getattr(inner_model, "unmerge_adapter", None)
         is_peft = callable(merge_fn) and callable(unmerge_fn)
 
-        # 2. If LoRA, merge weights before gathering
         if is_peft:
-            merge_fn()
+            if self.lora_sync is None:
+                raise RuntimeError(
+                    "PEFT/LoRA model detected but Trainer was constructed without "
+                    "lora_sync=LoRASyncConfig(...). The legacy merge -> full-state push "
+                    "path has been removed; PEFT runs must hot-swap adapters via "
+                    "/update_lora."
+                )
+            self._push_lora_adapter_to_runtime()
+            return
 
-        try:
-            rank = 0
-            is_distributed = dist.is_available() and dist.is_initialized()
-            if is_distributed:
-                rank = dist.get_rank()
+        if self.publisher is None:
+            return
 
-            runtime_device = torch.device(
-                self.cfg.runtime_device or self.cfg.model_device
+        rank = 0
+        is_distributed = dist.is_available() and dist.is_initialized()
+        if is_distributed:
+            rank = dist.get_rank()
+
+        runtime_device = torch.device(
+            self.cfg.runtime_device or self.cfg.model_device
+        )
+        current_version = self._train_step_idx
+        raw_params: Dict[str, Tensor] = {}
+
+        if isinstance(self.model, fsdp.FSDPModule):
+            # DCP full_state_dict gathering is collective; all ranks must participate.
+            options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+            full_state = get_model_state_dict(model=self.model, options=options)
+            if is_distributed and rank != 0:
+                return
+            for k, v in full_state.items():
+                if self.param_filter is not None and not self.param_filter(k, v):
+                    continue
+                raw_params[k] = v.detach().to(runtime_device)
+        else:
+            if is_distributed and rank != 0:
+                return
+            for name, p in self.model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if self.param_filter is not None and not self.param_filter(name, p):
+                    continue
+                raw_params[name] = p.detach().to(runtime_device)
+
+        if not raw_params:
+            return
+        self.publisher.publish(raw_params, version=current_version)
+
+    def _push_lora_adapter_to_runtime(self) -> None:
+        """Gather LoRA adapter weights collectively (every rank participates in
+        full_tensor()), then rank 0 writes safetensors + adapter_config.json
+        and POSTs each vLLM client's /update_lora endpoint."""
+        from safetensors.torch import save_file
+
+        cfg = self.lora_sync
+        assert cfg is not None
+
+        is_distributed = dist.is_available() and dist.is_initialized()
+        rank = dist.get_rank() if is_distributed else 0
+        version = int(self._train_step_idx)
+
+        adapter_sd: Dict[str, Tensor] = {}
+        for name, p in self.model.named_parameters():
+            if "lora_A" not in name and "lora_B" not in name:
+                continue
+            full = p.full_tensor() if hasattr(p, "full_tensor") else p.detach()
+            if rank == 0:
+                adapter_sd[_to_peft_key(name)] = full.detach().to(torch.bfloat16).cpu()
+            else:
+                del full
+        if is_distributed:
+            dist.barrier()
+        if rank != 0:
+            return
+
+        if not adapter_sd:
+            raise RuntimeError(
+                "LoRA sync collected no lora_A/lora_B params — the trainer model "
+                "is not wrapped with PEFT (or the adapter is empty)."
             )
 
-            # We use the current training step as the authoritative version for PipelineRL
-            current_version = self._train_step_idx
+        target_modules = _resolve_lora_target_modules(self.model)
+        adapter_config = {
+            "peft_type": "LORA",
+            "task_type": "CAUSAL_LM",
+            "r": int(cfg.lora_rank),
+            "lora_alpha": int(cfg.lora_alpha),
+            "lora_dropout": 0.0,
+            "bias": "none",
+            "fan_in_fan_out": False,
+            "target_modules": target_modules,
+            "base_model_name_or_path": cfg.base_model_name,
+            "inference_mode": True,
+        }
 
-            raw_params: Dict[str, Tensor] = {}
+        adapter_root = os.path.abspath(cfg.adapter_root)
+        os.makedirs(adapter_root, exist_ok=True)
+        adapter_dir = os.path.join(adapter_root, f"policy_v{version}")
+        os.makedirs(adapter_dir, exist_ok=True)
+        save_file(adapter_sd, os.path.join(adapter_dir, "adapter_model.safetensors"))
+        with open(os.path.join(adapter_dir, "adapter_config.json"), "w") as f:
+            json.dump(adapter_config, f)
 
-            # --- Gather Raw Params (FSDP2 or Standard) ---
-            if isinstance(self.model, fsdp.FSDPModule):
-                # DCP full_state_dict gathering is collective; all ranks must participate.
-                # Use cpu_offload=True to avoid materializing a full copy on every rank.
-                options = StateDictOptions(
-                    full_state_dict=True,
-                    cpu_offload=True,
-                )
-                full_state = get_model_state_dict(
-                    model=self.model,
-                    options=options,
-                )
-                if is_distributed and rank != 0:
-                    return
-                for k, v in full_state.items():
-                    if self.param_filter is not None and not self.param_filter(k, v):
-                        continue
-                    raw_params[k] = v.detach().to(runtime_device)
-            else:
-                # Only rank 0 talks to the runtime in distributed mode
-                if is_distributed and rank != 0:
-                    return
-
-                # Standard model
-                for name, p in self.model.named_parameters():
-                    # Optimization: In LoRA, only send what we touched (plus what needs fusion)
-                    # If not PEFT, only send requires_grad.
-                    # If PEFT (merged), we theoretically need to send the whole base layer
-                    # because it changed.
-
-                    # If standard training: send only requires_grad=True
-                    # If LoRA (merged): send everything (because base weights need updating in vLLM)
-                    if not is_peft and not p.requires_grad:
-                        continue
-
-                    if self.param_filter is not None:
-                        if not self.param_filter(name, p):
-                            continue
-
-                    raw_params[name] = p.detach().to(runtime_device)
-
-            if not raw_params:
-                return
-
-            # --- Publish ---
-            # NOTE: We simply hand off the raw state dict and rely on the Publisher to handle fusion and renaming.
-            self.publisher.publish(raw_params, version=current_version)
-
-        finally:
-            # 3. CRITICAL: Unmerge adapters immediately after publishing.
-            #    If we don't do this, the optimizer state will become invalid
-            #    (gradients calculated on merged weights vs adapter weights).
-            if is_peft:
-                unmerge_fn()
+        for c in cfg.clients:
+            resp = c._session.post(
+                f"{c.server_url}/update_lora",
+                json={"lora_name": "policy", "lora_path": adapter_dir, "version": version},
+                timeout=_LORA_UPDATE_TIMEOUT_S,
+            )
+            resp.raise_for_status()
