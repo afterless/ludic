@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List
 
 import torch
+import torch.distributed as dist
 from torch import Tensor
 
 from ludic.training.types import SAWItem, ActorTokenLogps, SampleAttachments
@@ -40,6 +41,19 @@ def collate_saw_items(
     lengths = [len(it.input_ids) for it in items]
     max_len = max(lengths)
     batch_size = len(items)
+
+    # Diagnostic for the packing vs left-align+pad decision: log per-micro-batch
+    # waste = padded_tokens / total_tokens (high → packing would pay off). Rank-0
+    # only to keep the trainer log readable.
+    if not dist.is_initialized() or dist.get_rank() == 0:
+        real_tokens = sum(lengths)
+        total_tokens = batch_size * max_len
+        pad_ratio = 1.0 - (real_tokens / total_tokens) if total_tokens else 0.0
+        print(
+            f"[micro-batch pad-stats] B={batch_size} max_len={max_len} "
+            f"real={real_tokens} total={total_tokens} pad_ratio={pad_ratio:.4f}",
+            flush=True,
+        )
 
     input_ids = torch.full(
         (batch_size, max_len),
