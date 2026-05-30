@@ -1,3 +1,4 @@
+import asyncio
 import atexit
 import logging
 import time
@@ -6,7 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 import requests
 import aiohttp
 import torch  # type: ignore
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 from requests import ConnectionError
 from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException, Timeout
@@ -196,8 +197,17 @@ class VLLMChatClient(ChatClient):
         if extra_body:
             request_kwargs["extra_body"] = extra_body
 
-        # Call completions endpoint (not chat completions)
-        resp = await self._async_client.completions.create(**request_kwargs)
+        # Call completions endpoint (not chat completions). One retry-on-400 for
+        # the transient unload→load window in /update_lora hot-swap (a request that
+        # lands between unload_lora_adapter and load_lora_adapter sees "model does
+        # not exist"); the gap is sub-100ms in practice.
+        try:
+            resp = await self._async_client.completions.create(**request_kwargs)
+        except BadRequestError as e:
+            if "does not exist" not in str(e):
+                raise
+            await asyncio.sleep(0.2)
+            resp = await self._async_client.completions.create(**request_kwargs)
 
         choice = resp.choices[0]
         text = choice.text

@@ -217,10 +217,12 @@ def aggregate_stats(
                     continue
                 values.append(_apply_transform(raw, reducer.transform))
 
+            # For kind="mean" with NO matching items in the batch, emit NaN so wandb
+            # plots a gap (not a misleading 0); sum/count_true stay 0.0 since "no items"
+            # genuinely means count 0. rich renders NaN as the string "nan" — no crash.
             result: float = 0.0
             if reducer.kind == "mean":
-                if values:
-                    result = float(sum(float(v) for v in values) / len(values))
+                result = float(sum(float(v) for v in values) / len(values)) if values else float("nan")
             elif reducer.kind == "sum":
                 result = float(sum(float(v) for v in values))
             elif reducer.kind == "count_true":
