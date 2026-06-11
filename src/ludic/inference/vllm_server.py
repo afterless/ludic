@@ -30,6 +30,10 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.system_utils import set_ulimit
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.utils.network_utils import get_tcp_uri
+from vllm.v1.engine.utils import CoreEngineProcManager
+from vllm.v1.executor import Executor
+from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
 # V1 logits-processor interface
 from vllm.v1.sample.logits_processor.interface import (
@@ -59,7 +63,7 @@ def create_background_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
 
 
 # ---------------------------------------------------------------------------
-# Custom logits processor: inject "</think>" after N tokens (pure V1)
+# Custom logits processor: inject closed think tag after N tokens (pure V1)
 # ---------------------------------------------------------------------------
 
 
@@ -358,6 +362,71 @@ async def run_server(args: Namespace) -> None:
     sock.close()
 
 
+def run_headless(args: Namespace) -> None:
+    set_ulimit()
+
+    shutdown_requested = False
+
+    def signal_handler(*_: Any) -> None:
+        nonlocal shutdown_requested
+        if not shutdown_requested:
+            shutdown_requested = True
+            raise SystemExit
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    think_proc = "ludic.inference.vllm_server:GlobalThinkProcessor"
+    if engine_args.logits_processors:
+        if think_proc not in engine_args.logits_processors:
+            engine_args.logits_processors.append(think_proc)
+    else:
+        engine_args.logits_processors = [think_proc]
+
+    vllm_config = engine_args.create_engine_config(
+        usage_context=UsageContext.OPENAI_API_SERVER, headless=True
+    )
+    try:
+        tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+        vllm_config.additional_config["think_ids"] = _thinking_close_ids(tokenizer)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to resolve the reasoning-close token for model "
+            f"{vllm_config.model_config.model}: {e}"
+        ) from e
+
+    parallel_config = vllm_config.parallel_config
+    local_engine_count = parallel_config.data_parallel_size_local
+    if local_engine_count <= 0:
+        raise ValueError("data_parallel_size_local must be > 0 in headless mode")
+
+    if parallel_config.node_rank_within_dp > 0:
+        executor = MultiprocExecutor(vllm_config, monitor_workers=False)
+        executor.start_worker_monitor(inline=True)
+        return
+
+    handshake_address = get_tcp_uri(
+        parallel_config.data_parallel_master_ip,
+        parallel_config.data_parallel_rpc_port,
+    )
+    engine_manager = CoreEngineProcManager(
+        local_engine_count=local_engine_count,
+        start_index=parallel_config.data_parallel_rank,
+        local_start_index=0,
+        vllm_config=vllm_config,
+        local_client=False,
+        handshake_address=handshake_address,
+        executor_class=Executor.get_class(vllm_config),
+        log_stats=not engine_args.disable_log_stats,
+    )
+    try:
+        engine_manager.monitor_engine_liveness()
+    finally:
+        timeout = vllm_config.shutdown_timeout if shutdown_requested else None
+        engine_manager.shutdown(timeout=timeout)
+
+
 def main() -> None:
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-compatible server with weight synchronization"
@@ -378,6 +447,10 @@ def main() -> None:
     assert args is not None
     if args.batch_invariant:
         os.environ["VLLM_BATCH_INVARIANT"] = "1"
+    if args.headless:
+        args.api_server_count = 0
+        run_headless(args)
+        return
     validate_parsed_serve_args(args)
     print(args)
     uvloop.run(run_server(args))

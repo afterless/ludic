@@ -197,7 +197,7 @@ class VLLMChatClient(ChatClient):
         if extra_body:
             request_kwargs["extra_body"] = extra_body
 
-        # Call completions endpoint (not chat completions). One retry-on-400 for
+        # Call completions endpoint. One retry-on-400 for
         # the transient unload→load window in /update_lora hot-swap (a request that
         # lands between unload_lora_adapter and load_lora_adapter sees "model does
         # not exist"); the gap is sub-100ms in practice.
