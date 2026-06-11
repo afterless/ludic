@@ -106,6 +106,7 @@ class Trainer:
           * disable gradient sync on non-final micro-batches
           * gather a full state dict on rank 0 via DCP APIs
           * push the full (unsharded) params to the runtime
+          * This however does change if LoRA sync is enabled; see below.
 
       - On non-FSDP models, it just uses `named_parameters()` as before.
     """
@@ -185,6 +186,7 @@ class Trainer:
 
             evaluator:
                 Optional evaluator object used for periodic evaluation runs.
+            # TODO: Add cp_mesh, cp_loss_fn, and lora_sync to the config instead of the constructor for better clarity and maintainability.
         """
         self.cfg = cfg
         self.train_logger = train_logger
@@ -549,11 +551,21 @@ class Trainer:
                 limit = self.cfg.max_lag
 
                 fresh_items = []
+                lags = []
                 for item in saw_batch.items:
                     # Default to current_time (0 lag) if tag is missing
                     item_ver = item.meta.get("policy_version", current_time)
-                    if (current_time - item_ver) <= limit:
+                    lag = current_time - item_ver
+                    lags.append(lag)
+                    if lag <= limit:
                         fresh_items.append(item)
+
+                if saw_batch.items:
+                    logger.info(
+                        f"[max_lag] step={current_time} dropped "
+                        f"{len(saw_batch.items) - len(fresh_items)}/{len(saw_batch.items)} stale "
+                        f"(limit={limit}, max_lag_seen={max(lags)})"
+                    )
 
                 # Update the batch with only fresh items
                 saw_batch.items = fresh_items
@@ -1003,8 +1015,8 @@ class Trainer:
             if self.lora_sync is None:
                 raise RuntimeError(
                     "PEFT/LoRA model detected but Trainer was constructed without "
-                    "lora_sync=LoRASyncConfig(...). The legacy merge -> full-state push "
-                    "path has been removed; PEFT runs must hot-swap adapters via "
+                    "lora_sync=LoRASyncConfig(...). "
+                    "PEFT runs must hot-swap adapters via "
                     "/update_lora."
                 )
             self._push_lora_adapter_to_runtime()
