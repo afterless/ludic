@@ -106,7 +106,7 @@ class Trainer:
           * disable gradient sync on non-final micro-batches
           * gather a full state dict on rank 0 via DCP APIs
           * push the full (unsharded) params to the runtime
-          * This however does change if LoRA sync is enabled; see below.
+          * (LoRA sync, if enabled, instead pushes only the lora_A/B adapter.)
 
       - On non-FSDP models, it just uses `named_parameters()` as before.
     """
@@ -186,7 +186,6 @@ class Trainer:
 
             evaluator:
                 Optional evaluator object used for periodic evaluation runs.
-            # TODO: Add cp_mesh, cp_loss_fn, and lora_sync to the config instead of the constructor for better clarity and maintainability.
         """
         self.cfg = cfg
         self.train_logger = train_logger
@@ -550,25 +549,18 @@ class Trainer:
                 current_time = self._train_step_idx
                 limit = self.cfg.max_lag
 
-                fresh_items = []
-                lags = []
-                for item in saw_batch.items:
-                    # Default to current_time (0 lag) if tag is missing
-                    item_ver = item.meta.get("policy_version", current_time)
-                    lag = current_time - item_ver
-                    lags.append(lag)
-                    if lag <= limit:
-                        fresh_items.append(item)
-
-                if saw_batch.items:
+                # A missing policy_version tag defaults to current_time (0 lag).
+                fresh_items = [
+                    item for item in saw_batch.items
+                    if current_time - item.meta.get("policy_version", current_time) <= limit
+                ]
+                dropped = len(saw_batch.items) - len(fresh_items)
+                if dropped:
                     print(
-                        f"[max_lag] step={current_time} dropped "
-                        f"{len(saw_batch.items) - len(fresh_items)}/{len(saw_batch.items)} stale "
-                        f"(limit={limit}, max_lag_seen={max(lags)})",
+                        f"[max_lag] step={current_time}: dropped {dropped}/"
+                        f"{len(saw_batch.items)} stale (limit={limit})",
                         flush=True,
                     )
-
-                # Update the batch with only fresh items
                 saw_batch.items = fresh_items
 
             # Snapshot the fresh population before drop_zero, for outcome-rate metrics.
