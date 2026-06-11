@@ -561,10 +561,11 @@ class Trainer:
                         fresh_items.append(item)
 
                 if saw_batch.items:
-                    logger.info(
+                    print(
                         f"[max_lag] step={current_time} dropped "
                         f"{len(saw_batch.items) - len(fresh_items)}/{len(saw_batch.items)} stale "
-                        f"(limit={limit}, max_lag_seen={max(lags)})"
+                        f"(limit={limit}, max_lag_seen={max(lags)})",
+                        flush=True,
                     )
 
                 # Update the batch with only fresh items
