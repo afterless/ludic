@@ -189,6 +189,9 @@ def _thinking_close_ids(tokenizer) -> list[int]:
     it never closed the channel) and its lowercase words corrupted
     reasoning-format side tasks (e.g. uppercase-CoT) by polluting reasoning_content.
     """
+    # Non-native inline <think>: force the inline close, not the native marker.
+    if os.environ.get("LUDIC_INLINE_THINKING"):
+        return tokenizer.encode("</think>", add_special_tokens=False)
     for marker in ("<channel|>", "</think>", "<|im_end|>", "<|eot_id|>"):
         try:
             ids = tokenizer.encode(marker, add_special_tokens=False)
