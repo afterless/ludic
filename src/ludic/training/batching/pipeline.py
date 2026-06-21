@@ -74,14 +74,20 @@ class PipelineBatchSource(BatchSource):
 
         # Calculate basic batch stats for logging
         avg_reward = 0.0
+        avg_completion_length = 0.0
+        avg_prompt_length = 0.0
         if items:
-            total_r = sum(it.meta.get("total_reward", 0.0) for it in items)
-            avg_reward = total_r / len(items)
+            n = len(items)
+            avg_reward = sum(it.meta.get("total_reward", 0.0) for it in items) / n
+            avg_completion_length = sum(it.meta.get("completion_length", 0) or 0 for it in items) / n
+            avg_prompt_length = sum(it.meta.get("prompt_length", 0) or 0 for it in items) / n
 
         meta = {
             "target_rollouts": len(items),
             "num_samples": len(items),
             "avg_total_reward": avg_reward,
+            "avg_completion_length": avg_completion_length,
+            "avg_prompt_length": avg_prompt_length,
             "source": "pipeline_redis"
         }
 
