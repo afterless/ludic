@@ -156,6 +156,10 @@ def aggregate_stats(
     total_effective_rollouts = 0.0
     total_reward_sum = 0.0
     total_completion_len = 0.0
+    total_lag_sum = 0.0
+    total_drop_rate_sum = 0.0
+    realized_lag_max = 0.0
+    lag_samples = 0.0
 
     for batch in saw_batches:
         num_items = float(len(batch.items))
@@ -180,6 +184,13 @@ def aggregate_stats(
         avg_completion_len = float(batch.meta.get("avg_completion_length", 0.0))
         total_completion_len += avg_completion_len * num_items
 
+        # Off-policyness diagnostics (realized lag + max_lag drop rate)
+        if "realized_lag_mean" in batch.meta:
+            total_lag_sum += float(batch.meta["realized_lag_mean"]) * num_items
+            total_drop_rate_sum += float(batch.meta.get("max_lag_drop_rate", 0.0)) * num_items
+            realized_lag_max = max(realized_lag_max, float(batch.meta.get("realized_lag_max", 0.0)))
+            lag_samples += num_items
+
     agg_stats["num_samples"] = total_samples
     agg_stats["target_rollouts"] = total_target_rollouts
     agg_stats["effective_rollouts"] = total_effective_rollouts
@@ -190,6 +201,11 @@ def aggregate_stats(
     else:
         agg_stats["avg_total_reward"] = 0.0
         agg_stats["avg_completion_length"] = 0.0
+
+    if lag_samples > 0:
+        agg_stats["realized_lag_mean"] = total_lag_sum / lag_samples
+        agg_stats["realized_lag_max"] = realized_lag_max
+        agg_stats["max_lag_drop_rate"] = total_drop_rate_sum / lag_samples
 
     # 3) Custom reducers (optional)
     if reducers:

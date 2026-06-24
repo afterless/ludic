@@ -245,7 +245,51 @@ else:
     _selective_log_softmax_compiled = _selective_log_softmax_impl
 
 
-def selective_log_softmax(logits: Logits, index: TokenIds) -> Float[Tensor, "B T"]:
+_LOGP_CHUNK_TOKENS = int(os.getenv("LUDIC_LOGP_CHUNK_TOKENS", "1024"))
+
+
+class _ChunkedSelectiveLogSoftmax(torch.autograd.Function):
+    """gather(log_softmax(logits)) computed in sequence-chunks so the full
+    (B,S,V) log-softmax and its gradient never materialize. Operates on the 3D
+    logits directly (no reshape/copy); numerically identical to the fused path."""
+
+    @staticmethod
+    def forward(ctx, logits, index, chunk_tokens):
+        B, S, _ = logits.shape
+        chunk_s = max(1, chunk_tokens // max(1, B))
+        out = logits.new_empty((B, S))
+        for s in range(0, S, chunk_s):
+            e = min(s + chunk_s, S)
+            lc = logits[:, s:e, :]
+            lse = torch.logsumexp(lc, dim=-1)
+            gathered = lc.gather(-1, index[:, s:e, None]).squeeze(-1)
+            out[:, s:e] = gathered - lse
+        ctx.save_for_backward(logits, index)
+        ctx.chunk_s = chunk_s
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        logits, index = ctx.saved_tensors
+        B, S, V = logits.shape
+        grad_logits = torch.zeros(B, S, V, dtype=logits.dtype, device=logits.device)
+        for s in range(0, S, ctx.chunk_s):
+            e = min(s + ctx.chunk_s, S)
+            go = grad_out[:, s:e, None]
+            # d logp/d logit = onehot(tgt) - softmax, scaled by upstream grad_out
+            g = logits[:, s:e, :].softmax(dim=-1).mul_(-go)
+            g.scatter_add_(-1, index[:, s:e, None], go)
+            grad_logits[:, s:e, :] = g
+        return grad_logits, None, None
+
+
+def selective_log_softmax(
+    logits: Logits, index: TokenIds, chunk_size: Optional[int] = None
+) -> Float[Tensor, "B T"]:
+    chunk = _LOGP_CHUNK_TOKENS if chunk_size is None else chunk_size
+    B, S = index.shape
+    if chunk and chunk > 0 and B * S > chunk:
+        return _ChunkedSelectiveLogSoftmax.apply(logits, index, chunk)
     global _USE_COMPILED_SELECTIVE_LOG_SOFTMAX
     if _USE_COMPILED_SELECTIVE_LOG_SOFTMAX:
         try:

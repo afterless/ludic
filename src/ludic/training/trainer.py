@@ -550,11 +550,18 @@ class Trainer:
                 limit = self.cfg.max_lag
 
                 # A missing policy_version tag defaults to current_time (0 lag).
+                lags = [
+                    current_time - item.meta.get("policy_version", current_time)
+                    for item in saw_batch.items
+                ]
                 fresh_items = [
-                    item for item in saw_batch.items
-                    if current_time - item.meta.get("policy_version", current_time) <= limit
+                    item for item, lag in zip(saw_batch.items, lags) if lag <= limit
                 ]
                 dropped = len(saw_batch.items) - len(fresh_items)
+                if lags:
+                    saw_batch.meta["realized_lag_mean"] = sum(lags) / len(lags)
+                    saw_batch.meta["realized_lag_max"] = max(lags)
+                    saw_batch.meta["max_lag_drop_rate"] = dropped / len(lags)
                 if dropped:
                     print(
                         f"[max_lag] step={current_time}: dropped {dropped}/"
