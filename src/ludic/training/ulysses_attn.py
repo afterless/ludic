@@ -23,6 +23,9 @@ from transformers.integrations.sdpa_attention import repeat_kv, sdpa_attention_f
 
 _SP_GROUP = None
 _SP_SIZE = 1
+# Keyed by (sliding_window, device) — NOT by S. Each entry holds one mask sized to
+# the largest S seen so far; smaller S slice its top-left. Keying by S leaked ~1GB/step
+# because every distinct full-seq length permanently cached a fresh [S, S] bool tensor.
 _MASK_CACHE: dict[tuple, torch.Tensor] = {}
 
 
@@ -74,15 +77,20 @@ def _head_to_seq(x: torch.Tensor, P: int, group) -> torch.Tensor:
 
 
 def _sliding_window_mask(S: int, sw: int, device) -> torch.Tensor:
-    """Boolean [S, S] sliding causal band: attend iff (j <= i) and (i - j < sw)."""
-    key = (S, sw, device)
+    """Boolean [S, S] sliding causal band: attend iff (j <= i) and (i - j < sw).
+
+    Cache one mask per (sw, device) sized to the largest S seen; the band is
+    origin-anchored, so any smaller S is exactly the top-left [:S, :S] slice. This
+    keeps the cache at O(1) tensors instead of one [S, S] per distinct seq length.
+    """
+    key = (sw, device)
     m = _MASK_CACHE.get(key)
-    if m is None:
+    if m is None or m.shape[0] < S:
         i = torch.arange(S, device=device).unsqueeze(1)
         j = torch.arange(S, device=device).unsqueeze(0)
         m = (j <= i) & (i - j < sw)
         _MASK_CACHE[key] = m
-    return m
+    return m[:S, :S]
 
 
 def ulysses_attention_forward(
