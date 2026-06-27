@@ -73,7 +73,7 @@ def _cispo_from_shard(token_logp, pos_actor_logps, mask, adv, counts, cispo, kl_
     return loss, ratio, log_ratio
 
 
-def _sp_stats(loss, token_logp, mask, ratio, log_ratio, adv, group):
+def _sp_stats(loss, token_logp, mask, ratio, log_ratio, adv, group, clip_low, clip_high):
     """Logging stats, token-weighted means reduced over the sp group."""
     with torch.no_grad():
         tok = mask.sum()
@@ -87,16 +87,21 @@ def _sp_stats(loss, token_logp, mask, ratio, log_ratio, adv, group):
 
         loss_disp = loss.detach().clone()
         dist.all_reduce(loss_disp, op=dist.ReduceOp.AVG, group=group)
+        r_mean = _mm(ratio)
+        r_sq_mean = _mm(ratio * ratio)
+        clipped = ((ratio < 1.0 - clip_low) | (ratio > 1.0 + clip_high)).to(ratio.dtype)
         return {
             "loss": loss_disp,
-            "ratio_mean": _mm(ratio).detach(),
+            "ratio_mean": r_mean.detach(),
+            "clip_frac": _mm(clipped).detach(),
+            "ess_frac": (r_mean * r_mean / r_sq_mean.clamp(min=1e-12)).detach(),
             "kl_actor_policy": _mm(ratio - log_ratio - 1.0).detach(),
             "logp_mean": _mm(token_logp).detach(),
             "adv_mean": adv.mean().detach(),
         }
 
 
-def ulysses_compute_loss(model, batch, algo, sp_mesh, *, cast_logits_to_fp32=False):
+def ulysses_compute_loss(model, batch, algo, sp_mesh, *, cast_logits_to_fp32=False, use_fused_lm_head=False):
     """Plain seq-shard forward (ulysses attention) + scalerl loss, reduced over sp."""
     cispo, kl_mult = _extract_scalerl_terms(algo.loss)
     group = sp_mesh.get_group()
@@ -130,12 +135,21 @@ def ulysses_compute_loss(model, batch, algo, sp_mesh, *, cast_logits_to_fp32=Fal
     mask_shard = pos_mask[:, sl].contiguous()
     actor_shard = pos_actor_logps[:, sl].contiguous()
 
-    outputs = model(input_ids=ids_shard, position_ids=pos_shard)
-    logits = outputs.logits
-    if cast_logits_to_fp32:
-        logits = logits.float()
+    if use_fused_lm_head:
+        from ludic.training.fused_lm_head import build_fused_lm_head, fused_token_logp
 
-    token_logp = selective_log_softmax(logits, tgt_shard)  # [B, Sl]
+        fused = build_fused_lm_head(model, ids_shard, position_ids=pos_shard)
+        # tgt_shard is preshifted + aligned with the hidden shard, so no extra shift.
+        token_logp = fused_token_logp(
+            fused.hidden, fused.weight, tgt_shard,
+            softcap=fused.softcap, tile_tokens=fused.tile_tokens,
+        )  # [B, Sl]
+    else:
+        outputs = model(input_ids=ids_shard, position_ids=pos_shard)
+        logits = outputs.logits
+        if cast_logits_to_fp32:
+            logits = logits.float()
+        token_logp = selective_log_softmax(logits, tgt_shard)  # [B, Sl]
     mask = mask_shard.to(token_logp.dtype)
     counts = mask.sum(dim=-1)
     dist.all_reduce(counts, op=dist.ReduceOp.SUM, group=group)  # global per-sample token count
@@ -144,7 +158,7 @@ def ulysses_compute_loss(model, batch, algo, sp_mesh, *, cast_logits_to_fp32=Fal
     loss, ratio, log_ratio = _cispo_from_shard(
         token_logp, actor_shard, mask, adv, counts, cispo, kl_mult, P, B
     )
-    stats = _sp_stats(loss, token_logp, mask, ratio, log_ratio, adv, group)
+    stats = _sp_stats(loss, token_logp, mask, ratio, log_ratio, adv, group, cispo.clip_eps_low, cispo.clip_eps_high)
     return loss, stats
 
 
@@ -189,14 +203,17 @@ def cp_compute_loss(model, batch, algo, cp_mesh, *, cast_logits_to_fp32=False):
         loss, ratio, log_ratio = _cispo_from_shard(
             token_logp, pos_actor_logps, mask, adv, counts, cispo, kl_mult, P, B
         )
-    stats = _sp_stats(loss, token_logp, mask, ratio, log_ratio, adv, group)
+    stats = _sp_stats(loss, token_logp, mask, ratio, log_ratio, adv, group, cispo.clip_eps_low, cispo.clip_eps_high)
     return loss, stats
 
 
-def parallel_compute_loss(model, batch, algo, mesh, *, mode="ulysses", cast_logits_to_fp32=False):
+def parallel_compute_loss(model, batch, algo, mesh, *, mode="ulysses", cast_logits_to_fp32=False, use_fused_lm_head=False):
     """Dispatch the sequence-parallel loss by `mode` ('ulysses' | 'ring')."""
     if mode == "ulysses":
-        return ulysses_compute_loss(model, batch, algo, mesh, cast_logits_to_fp32=cast_logits_to_fp32)
+        return ulysses_compute_loss(
+            model, batch, algo, mesh,
+            cast_logits_to_fp32=cast_logits_to_fp32, use_fused_lm_head=use_fused_lm_head,
+        )
     if mode == "ring":
         return cp_compute_loss(model, batch, algo, mesh, cast_logits_to_fp32=cast_logits_to_fp32)
     raise ValueError(f"unknown parallel mode {mode!r} (expected 'ulysses' or 'ring')")
