@@ -147,23 +147,56 @@ def make_dataset_sequence_requests_fn(
     group_size: int = 1,
     shuffle: bool = False,
     rng_seed: int = 0,
+    state_path: Optional[str] = None,
 ) -> Callable[[], List[RolloutRequest]]:
     """
     Dataset-style `requests_fn` over a fixed in-memory sequence of samples.
 
     - If shuffle=True, samples are visited in a pseudo-random order (deterministic via rng_seed).
     - Once exhausted, it loops forever (research scaffolding default); wrap your own if you want a stop condition.
+    - If state_path is set, the cursor (pos+epoch) is persisted there after every batch and
+      reloaded on construction, so a requeued run resumes the data walk instead of restarting.
     """
+    import json
+    import os
     import random
 
     if not samples:
         raise ValueError("samples must be non-empty")
 
     rng = random.Random(rng_seed)
-    order = list(range(len(samples)))
-    if shuffle:
-        rng.shuffle(order)
+    n = len(samples)
+
+    def _reshuffle() -> List[int]:
+        o = list(range(n))
+        if shuffle:
+            rng.shuffle(o)
+        return o
+
+    order = _reshuffle()
     pos = 0
+    epoch = 0
+    if state_path is not None and os.path.exists(state_path):
+        try:
+            with open(state_path) as fh:
+                saved = json.load(fh)
+            pos = int(saved.get("pos", 0))
+            epoch = int(saved.get("epoch", 0))
+            for _ in range(epoch):  # replay reshuffles to reach the saved epoch's order
+                order = _reshuffle()
+        except Exception:
+            pos, epoch, order = 0, 0, _reshuffle()
+
+    def _save_cursor() -> None:
+        if state_path is None:
+            return
+        try:
+            tmp = f"{state_path}.tmp"
+            with open(tmp, "w") as fh:
+                json.dump({"pos": pos, "epoch": epoch}, fh)
+            os.replace(tmp, state_path)
+        except Exception:
+            pass
 
     env_kwargs_fn_final: Callable[[T], Dict[str, JSON]]
     if env_kwargs_fn is None:
@@ -192,14 +225,13 @@ def make_dataset_sequence_requests_fn(
         strategy = GRPORequestStrategy(group_size=group_size)
 
     def _fn() -> List[RolloutRequest]:
-        nonlocal pos, order
+        nonlocal pos, order, epoch
         reqs: List[RolloutRequest] = []
         for _ in range(batch_size):
             if pos >= len(order):
                 pos = 0
-                order = list(range(len(samples)))
-                if shuffle:
-                    rng.shuffle(order)
+                epoch += 1
+                order = _reshuffle()
             idx = order[pos]
             pos += 1
             sample = samples[idx]
@@ -218,6 +250,7 @@ def make_dataset_sequence_requests_fn(
                 )
             )
 
+        _save_cursor()
         if strategy is not None:
             return strategy.expand(reqs)
         return reqs
