@@ -327,9 +327,12 @@ class WandbLogger:
             kwargs["project"] = "Ludic"
 
         self._run = wandb.init(**kwargs)
+        if self._run is not None:
+            self._run.define_metric("global_step")
+            self._run.define_metric("*", step_metric="global_step")
 
     def log(self, step: int, stats: Dict[str, float]) -> None:
-        self._wandb.log(stats, step=step)
+        self._wandb.log({**stats, "global_step": step})
 
     def close(self) -> None:
         if self._run is not None:
