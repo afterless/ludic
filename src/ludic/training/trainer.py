@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import logging
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
@@ -35,6 +37,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _LORA_UPDATE_TIMEOUT_S = 600.0
+_ADAPTER_KEEP = 16
 _LORA_DEFAULT_TARGET_SUFFIXES = (
     "q_proj", "k_proj", "v_proj", "o_proj",
     "gate_proj", "up_proj", "down_proj",
@@ -361,8 +364,9 @@ class Trainer:
             t_sum = torch.tensor(sum_reduce_vals, dtype=torch.float32, device=device)
             dist.all_reduce(t_sum, op=dist.ReduceOp.SUM)
             sum_vals = t_sum.cpu().tolist()
+            cp_size = self.cp_mesh.size() if self.cp_mesh is not None else 1
             for k, v in zip(sum_reduce_keys, sum_vals):
-                reduced[k] = v
+                reduced[k] = v / cp_size
 
         # Batch all_reduce for mean keys using sample-weighted sums.
         if mean_reduce_vals:
@@ -505,6 +509,94 @@ class Trainer:
 
         return stats, peak
 
+    async def _fetch_macro_batch(self):
+        """Assemble one macro-batch of a *consistent* trainable size.
+
+        next_batch() yields a fixed `batch_size`, but the max_lag stale-drop +
+        drop_zero (algo.preprocess) then shrink it by a variable amount. Backfill to
+        a fixed `target` and trim, so every step (and rank) trains on the same N.
+        Returns (macro, outcome); outcome is the fresh pre-drop_zero population.
+        """
+        target = self._batch_source.batch_size
+
+        trainable_items = []
+        outcome_items = []
+        all_lags = []
+        n_stale_dropped = 0
+        n_seen = 0
+        base_meta = None
+        pulls = 0
+
+        # Block for a full `target` of trainable (post-max_lag, post-drop_zero) items
+        # so the gradient batch size is identical every step and across FSDP ranks.
+        while len(trainable_items) < target:
+            saw_batch = await self._batch_source.next_batch()
+            pulls += 1
+            if base_meta is None:
+                base_meta = dict(saw_batch.meta)
+
+            raw_items = saw_batch.items
+            n_seen += len(raw_items)
+
+            # Drop items that exceed max_lag (staleness).
+            if self.cfg.max_lag is not None:
+                current_time = self._train_step_idx
+                limit = self.cfg.max_lag
+                lags = [
+                    current_time - item.meta.get("policy_version", current_time)
+                    for item in raw_items
+                ]
+                fresh_items = [
+                    item for item, lag in zip(raw_items, lags) if lag <= limit
+                ]
+                n_stale_dropped += len(raw_items) - len(fresh_items)
+                all_lags.extend(lags)
+                saw_batch.items = fresh_items
+
+            # Snapshot the fresh population before drop_zero, for outcome-rate metrics.
+            outcome_items.extend(saw_batch.items)
+
+            # Drop zero-advantage samples (algo.preprocess) — the second shrink stage.
+            if self.algo.preprocess is not None:
+                saw_batch = self.algo.preprocess(saw_batch)
+            trainable_items.extend(saw_batch.items)
+
+        if n_stale_dropped:
+            print(
+                f"[max_lag] step={self._train_step_idx}: dropped {n_stale_dropped}/"
+                f"{n_seen} stale over {pulls} pull(s) (limit={self.cfg.max_lag})",
+                flush=True,
+            )
+
+        # Trim the final pull's overshoot so the batch size is exactly `target`.
+        trainable_items = trainable_items[:target]
+
+        macro = SAWBatch(items=trainable_items, meta=dict(base_meta or {}))
+        n_train = len(trainable_items)
+        macro.meta["num_samples"] = n_train
+        macro.meta["target_rollouts"] = n_train
+        if outcome_items:
+            macro.meta["avg_total_reward"] = sum(
+                it.meta.get("total_reward", 0.0) for it in outcome_items
+            ) / len(outcome_items)
+            macro.meta["avg_completion_length"] = sum(
+                it.meta.get("completion_length", 0) or 0 for it in outcome_items
+            ) / len(outcome_items)
+        if all_lags:
+            macro.meta["realized_lag_mean"] = sum(all_lags) / len(all_lags)
+            macro.meta["realized_lag_max"] = max(all_lags)
+            macro.meta["max_lag_drop_rate"] = n_stale_dropped / len(all_lags)
+
+        rollout_ids = {
+            item.meta.get("rollout_id")
+            for item in trainable_items
+            if item.meta.get("rollout_id") is not None
+        }
+        macro.meta["effective_rollouts"] = len(rollout_ids) if rollout_ids else n_train
+
+        outcome = SAWBatch(items=outcome_items, meta=dict(macro.meta))
+        return macro, outcome
+
     # ------------------------------------------------------------------
     # Core async train step (now a "macro-step")
     # ------------------------------------------------------------------
@@ -539,64 +631,11 @@ class Trainer:
         # from the previous state (which should be zero).
         self.model.train()
 
-        # For PipelineRL, we might receive stale data from the queue.
-        # We loop until we get a batch containing at least one fresh item.
-        while True:
-            saw_batch = await self._batch_source.next_batch()
-
-            # If configured, filter out items that exceed max_lag.
-            if self.cfg.max_lag is not None:
-                current_time = self._train_step_idx
-                limit = self.cfg.max_lag
-
-                # A missing policy_version tag defaults to current_time (0 lag).
-                lags = [
-                    current_time - item.meta.get("policy_version", current_time)
-                    for item in saw_batch.items
-                ]
-                fresh_items = [
-                    item for item, lag in zip(saw_batch.items, lags) if lag <= limit
-                ]
-                dropped = len(saw_batch.items) - len(fresh_items)
-                if lags:
-                    saw_batch.meta["realized_lag_mean"] = sum(lags) / len(lags)
-                    saw_batch.meta["realized_lag_max"] = max(lags)
-                    saw_batch.meta["max_lag_drop_rate"] = dropped / len(lags)
-                if dropped:
-                    print(
-                        f"[max_lag] step={current_time}: dropped {dropped}/"
-                        f"{len(saw_batch.items)} stale (limit={limit})",
-                        flush=True,
-                    )
-                saw_batch.items = fresh_items
-
-            # Snapshot the fresh population before drop_zero, for outcome-rate metrics.
-            outcome_items = list(saw_batch.items)
-            outcome_meta = dict(saw_batch.meta)
-
-            # Algorithm-specific preprocessing (CPU-side) before collation.
-            if self.algo.preprocess is not None:
-                saw_batch = self.algo.preprocess(saw_batch)
-
-            # If the batch is empty (e.g. all stale), drop it and fetch another.
-            if not saw_batch.items:
-                continue
-
-            rollout_ids = {
-                item.meta.get("rollout_id")
-                for item in saw_batch.items
-                if item.meta.get("rollout_id") is not None
-            }
-            if rollout_ids:
-                saw_batch.meta["effective_rollouts"] = len(rollout_ids)
-            else:
-                saw_batch.meta["effective_rollouts"] = len(saw_batch.items)
-
-            # Batch has valid items, proceed to collation
-            break
-
+        # Assemble one macro-batch of a consistent trainable size (backfill past
+        # the max_lag / drop_zero shrink — see _fetch_macro_batch).
+        saw_batch, outcome_batch = await self._fetch_macro_batch()
         all_saw_batches.append(saw_batch)
-        all_outcome_batches.append(SAWBatch(items=outcome_items, meta=outcome_meta))
+        all_outcome_batches.append(outcome_batch)
 
         micro_chunks = split_items_by_token_budget(
             saw_batch.items,
@@ -654,12 +693,14 @@ class Trainer:
                         self.algo,
                         self.cp_mesh,
                         cast_logits_to_fp32=self.cfg.cast_logits_to_fp32,
+                        use_fused_lm_head=self.cfg.use_fused_lm_head,
                     )
                 else:
                     loss, stats = self.algo.compute_loss(
                         self.model,
                         batch_tensors,
                         cast_logits_to_fp32=self.cfg.cast_logits_to_fp32,
+                        use_fused_lm_head=self.cfg.use_fused_lm_head,
                     )
 
                 # Scale loss by micro-batch size to preserve macro-batch mean.
@@ -1122,3 +1163,10 @@ class Trainer:
                 timeout=_LORA_UPDATE_TIMEOUT_S,
             )
             resp.raise_for_status()
+
+        stale = sorted(
+            glob.glob(os.path.join(adapter_root, "policy_v*")),
+            key=lambda p: int(s) if (s := p.rsplit("policy_v", 1)[-1]).isdigit() else -1,
+        )[:-_ADAPTER_KEEP]
+        for old in stale:
+            shutil.rmtree(old, ignore_errors=True)
