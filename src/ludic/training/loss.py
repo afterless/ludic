@@ -13,6 +13,8 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 
+from ludic.training.fused_lm_head import FusedLMHead
+
 
 Batch = Mapping[str, Tensor]
 Logits = Float[Tensor, "B T V"]
@@ -128,7 +130,11 @@ class SharedContext:
         is the primary memory optimization.
         """
         if "token_logp" not in self._cache:
-            self._cache["token_logp"] = _compute_token_logp_raw(self.logits, self.input_ids)
+            self._cache["token_logp"] = (
+                self.logits.token_logp(self.input_ids)
+                if isinstance(self.logits, FusedLMHead)
+                else _compute_token_logp_raw(self.logits, self.input_ids)
+            )
         return self._cache["token_logp"]
 
     @property
@@ -350,14 +356,14 @@ def _compute_logp_action_raw(
     return logp_action
 
 
-@jaxtyped(typechecker=typechecker)
 def compute_logp_action(
-    logits: Logits,
+    logits,
     input_ids: TokenIds,
     action_mask: Mask,
     *,
     length_normalize: bool = False,
 ) -> Weights:
+    # logits may be a FusedLMHead (hidden+weight) instead of a [B,T,V] tensor.
     shared = _get_shared_context(
         logits,
         input_ids=input_ids,
@@ -365,6 +371,13 @@ def compute_logp_action(
     )
     if shared is not None:
         return shared.logp_action(length_normalize=length_normalize)
+    if isinstance(logits, FusedLMHead):
+        token_logp = logits.token_logp(input_ids)
+        amask = action_mask[:, 1:].to(token_logp.dtype)
+        logp_action = (token_logp * amask).sum(dim=-1)
+        if length_normalize:
+            logp_action = logp_action / amask.sum(dim=-1).clamp(min=1.0)
+        return logp_action
     return _compute_logp_action_raw(
         logits,
         input_ids,
@@ -396,16 +409,16 @@ def _compute_token_logp_raw(
     return selective_log_softmax(logits_shifted, target_ids)
 
 
-@jaxtyped(typechecker=typechecker)
 def compute_token_logp(
-    logits: Logits,
+    logits,
     input_ids: TokenIds,
 ) -> Float[Tensor, "B T-1"]:
+    # logits may be a FusedLMHead (hidden+weight) instead of a [B,T,V] tensor.
     shared = _get_shared_context(logits, input_ids=input_ids)
     if shared is not None:
-        if "token_logp" not in shared._cache:
-            shared._cache["token_logp"] = _compute_token_logp_raw(logits, input_ids)
-        return shared._cache["token_logp"]
+        return shared.token_logp
+    if isinstance(logits, FusedLMHead):
+        return logits.token_logp(input_ids)
     return _compute_token_logp_raw(logits, input_ids)
 
 

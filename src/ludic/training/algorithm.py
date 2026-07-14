@@ -59,6 +59,7 @@ class RLAlgorithm:
         batch: Batch,
         *,
         cast_logits_to_fp32: bool = False,
+        use_fused_lm_head: bool = False,
     ) -> tuple[Tensor, Dict[str, Any]]:
         """
         Runs the forward pass once and delegates to the Loss object.
@@ -74,6 +75,13 @@ class RLAlgorithm:
         # --- Run the forward pass ---
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
+        if use_fused_lm_head:
+            # Fuse lm_head into the per-token logp from hidden states, so the (B,T,V)
+            # logits never materialize (the OOM). fp32 cast happens per tile.
+            from ludic.training.fused_lm_head import build_fused_lm_head
+
+            fused = build_fused_lm_head(model, input_ids, attention_mask=attention_mask)
+            return self.loss.compute(fused, batch)
         outputs = model(
             input_ids=input_ids,
             attention_mask=attention_mask,

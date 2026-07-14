@@ -1224,6 +1224,7 @@ dependencies = [
     { name = "jaxtyping" },
     { name = "openai" },
     { name = "peft" },
+    { name = "renderers" },
     { name = "rich" },
     { name = "setuptools" },
     { name = "torch" },
@@ -1271,6 +1272,7 @@ requires-dist = [
     { name = "openai", specifier = ">=2.7.1" },
     { name = "peft", specifier = ">=0.18.0" },
     { name = "redis", marker = "extra == 'pipelinerl'", specifier = ">=7.1.0" },
+    { name = "renderers", specifier = ">=0.1.0" },
     { name = "rich", specifier = ">=14.2.0" },
     { name = "setuptools", specifier = ">=79.0.1" },
     { name = "tinker", marker = "extra == 'tinker'", specifier = "==0.7.0" },
@@ -2508,6 +2510,23 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/59/9b/7c29be7903c318488983e7d97abcf8ebd3830e4c956c4c540005fcfb0462/regex-2025.11.3-cp312-cp312-win32.whl", hash = "sha256:3839967cf4dc4b985e1570fd8d91078f0c519f30491c60f9ac42a8db039be204", size = 266194, upload-time = "2025-11-03T21:31:51.53Z" },
     { url = "https://files.pythonhosted.org/packages/1a/67/3b92df89f179d7c367be654ab5626ae311cb28f7d5c237b6bb976cd5fbbb/regex-2025.11.3-cp312-cp312-win_amd64.whl", hash = "sha256:e721d1b46e25c481dc5ded6f4b3f66c897c58d2e8cfdf77bbced84339108b0b9", size = 277069, upload-time = "2025-11-03T21:31:53.151Z" },
     { url = "https://files.pythonhosted.org/packages/d7/55/85ba4c066fe5094d35b249c3ce8df0ba623cfd35afb22d6764f23a52a1c5/regex-2025.11.3-cp312-cp312-win_arm64.whl", hash = "sha256:64350685ff08b1d3a6fff33f45a9ca183dc1d58bbfe4981604e70ec9801bbc26", size = 270330, upload-time = "2025-11-03T21:31:54.514Z" },
+]
+
+[[package]]
+name = "renderers"
+version = "0.1.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "numpy" },
+    { name = "openai" },
+    { name = "openai-harmony" },
+    { name = "tiktoken" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b1/5f/fdd86253f562ffdecbdb56cb8591961f0b82914a9abc4ebf43976befb891/renderers-0.1.7.tar.gz", hash = "sha256:d17ccbc3813dd0ee3a6f7d8794308bd4300eb2a80dbc01e83c8f47513e9614f0", size = 209731, upload-time = "2026-05-12T12:51:07.559Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f2/71/af973d6fb806cc0f7e9f4d7cab3ed7265745e596298c8eab2185260c6979/renderers-0.1.7-py3-none-any.whl", hash = "sha256:64b119d13952df983462d72882aa97f1c7075fc4a7409a6b6b85ee88d83dfa52", size = 97934, upload-time = "2026-05-12T12:51:06.534Z" },
 ]
 
 [[package]]

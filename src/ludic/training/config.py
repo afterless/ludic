@@ -132,6 +132,7 @@ class TrainerConfig:
     sync_every_steps: int = 1
     mixed_precision_dtype: Optional[str] = "bf16"
     cast_logits_to_fp32: bool = False  # ScaleRL: FP32 logits for IS ratio stability
+    use_fused_lm_head: bool = False  # fuse lm_head into per-token logp; avoids (B,T,V) OOM
 
     # PipelineRL specific settings
     max_lag: Optional[int] = None  # Drop batches older than N steps
