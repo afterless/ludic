@@ -1232,10 +1232,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-examples = [
-    { name = "datasets" },
-    { name = "math-verify" },
-]
 pipelinerl = [
     { name = "redis" },
 ]
@@ -1266,9 +1262,7 @@ typing = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.2" },
     { name = "beartype", specifier = ">=0.22.9" },
-    { name = "datasets", marker = "extra == 'examples'", specifier = "==4.4.1" },
     { name = "jaxtyping", specifier = ">=0.3.4" },
-    { name = "math-verify", marker = "extra == 'examples'", specifier = "==0.8.0" },
     { name = "openai", specifier = ">=2.7.1" },
     { name = "peft", specifier = ">=0.18.0" },
     { name = "redis", marker = "extra == 'pipelinerl'", specifier = ">=7.1.0" },
@@ -1280,7 +1274,7 @@ requires-dist = [
     { name = "torch", specifier = ">=2.8.0" },
     { name = "vllm", specifier = ">=0.13.0" },
 ]
-provides-extras = ["pipelinerl", "examples", "tinker"]
+provides-extras = ["pipelinerl", "tinker"]
 
 [package.metadata.requires-dev]
 dev = [
