@@ -291,8 +291,14 @@ async def run_server(args: Namespace) -> None:
             return {"status": "error", "detail": "missing 'lora_path'"}
 
         sm = app.state.openai_serving_models
+        # Abort (do NOT drain) in-flight requests before the LoRA swap. Draining
+        # with concurrency=128 @ max_tokens=8192 took minutes and wedged forever
+        # if any single rollout stalled near the token cap (the "sync hang").
+        # mode="abort" is the vLLM 0.20.2 default; wait_for_inflight_requests is
+        # the deprecated shim. A few rollouts spanning a swap is negligible
+        # off-policy noise for RL.
         await engine.pause_generation(
-            wait_for_inflight_requests=True,
+            mode="abort",
             clear_cache=False,
         )
         async with weight_update_lock:
